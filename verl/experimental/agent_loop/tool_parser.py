@@ -17,6 +17,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 
+import xml2dict
 import regex as re
 from pydantic import BaseModel
 
