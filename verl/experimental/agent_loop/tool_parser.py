@@ -17,6 +17,8 @@ import logging
 import os
 from abc import ABC, abstractmethod
 
+from typing import Optional
+
 import xml2dict
 import regex as re
 from pydantic import BaseModel
@@ -43,8 +45,9 @@ class FunctionCall(BaseModel):
 class ToolParser(ABC):
     _registry: dict[str, type["ToolParser"]] = {}
 
-    def __init__(self, tokenizer) -> None:
+    def __init__(self, tokenizer, tool_list: Optional[list] = []) -> None:
         self.tokenizer = tokenizer
+        self.tool_list = tool_list
 
     @abstractmethod
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
@@ -77,8 +80,8 @@ class ToolParser(ABC):
 class HermesToolParser(ToolParser):
     """Adapted from https://github.com/vllm-project/vllm/blob/v0.9.1/vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py"""
 
-    def __init__(self, tokenizer) -> None:
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, tool_list: Optional[list] = []) -> None:
+        super().__init__(tokenizer, tool_list)
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
@@ -110,8 +113,8 @@ class HermesToolParser(ToolParser):
 @ToolParser.register("qwen3_coder")
 class Qwen3CoderToolParser(ToolParser):
 
-    def __init__(self, tokenizer) -> None:
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, tool_list: Optional[list] = []) -> None:
+        super().__init__(tokenizer, tool_list)
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
