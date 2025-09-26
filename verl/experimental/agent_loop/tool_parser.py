@@ -104,3 +104,36 @@ class HermesToolParser(ToolParser):
         content = self.tool_call_regex.sub("", text)
 
         return content, function_calls
+
+
+@ToolParser.register("qwen3_coder")
+class Qwen3CoderToolParser(ToolParser):
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+
+        self.tool_call_start_token: str = "<tool_call>"
+        self.tool_call_end_token: str = "</tool_call>"
+        self.tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+    @rollout_trace_op
+    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+            return text, []
+
+        matches = self.tool_call_regex.findall(text)
+        function_calls = []
+        for match in matches:
+            try:
+                function_call = xml2dict.parse(match)
+                name, arguments = function_call["name"], function_call["arguments"]
+                function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+            except Exception as e:
+                logger.error(f"Failed to decode tool call: {e}")
+
+        # remaing text exclude tool call tokens
+        content = self.tool_call_regex.sub("", text)
+
+        return content, function_calls
