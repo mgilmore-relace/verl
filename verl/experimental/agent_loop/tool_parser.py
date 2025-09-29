@@ -296,7 +296,7 @@ class Qwen3CoderToolParser(ToolParser):
         # Quick check to avoid unnecessary processing
         loop = asyncio.get_running_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
-        if self.tool_call_start_token not in text or self.tool_call_end_token not in text:
+        if self.tool_call_prefix not in text:
             return text, []
 
         function_calls = self._get_function_calls(text)
