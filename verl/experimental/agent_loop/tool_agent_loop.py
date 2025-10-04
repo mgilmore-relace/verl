@@ -103,7 +103,7 @@ class ToolAgentLoop(AgentLoopBase):
             OpenAIFunctionToolSchema(
                 name="failed_tool",
                 function=OpenAIFunctionSchema(
-                    name="input"
+                    name="input",
                     description=""
                 )
             )
