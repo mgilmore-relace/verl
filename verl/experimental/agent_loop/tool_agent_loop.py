@@ -417,7 +417,7 @@ class ToolAgentLoop(AgentLoopBase):
             # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
-            if tool_name == 'failed_tool'
+            if tool_name == 'failed_tool':
                 logger.warning(f"Error when executing tool due to invalid json: {tool_args['error']}")
                 return (
                     ToolResponse(
