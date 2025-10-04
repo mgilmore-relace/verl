@@ -100,13 +100,7 @@ class ToolAgentLoop(AgentLoopBase):
         cls.tools = {tool.name: tool for tool in tool_list}
         cls.tools['failed_tool'] = FailedTool(
             {},
-            OpenAIFunctionToolSchema(
-                name="failed_tool",
-                function=OpenAIFunctionSchema(
-                    name="input",
-                    description=""
-                )
-            )
+            True
         )
         cls.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
         cls.tool_parser = ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.format, cls.tokenizer, tool_list)
