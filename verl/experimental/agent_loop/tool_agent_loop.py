@@ -24,7 +24,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.interactions.base import BaseInteraction
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
-from verl.tools.schemas import ToolResponse
+from verl.tools.schemas import ToolResponse, OpenAIFunctionToolSchema, OpenAIFunctionSchema
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
@@ -98,7 +98,16 @@ class ToolAgentLoop(AgentLoopBase):
         tool_config_path = config.actor_rollout_ref.rollout.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
         cls.tools = {tool.name: tool for tool in tool_list}
-        cls.tools['failed_tool'] = FailedTool({}, None)
+        cls.tools['failed_tool'] = FailedTool(
+            {},
+            OpenAIFunctionToolSchema(
+                name="failed_tool",
+                function=OpenAIFunctionSchema(
+                    name="input"
+                    description=""
+                )
+            )
+        )
         cls.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
         cls.tool_parser = ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.format, cls.tokenizer, tool_list)
         print(f"Initialized tools: {cls.tools}")
