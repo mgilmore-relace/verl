@@ -29,6 +29,8 @@ from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 
+from verl.tool.failed_tool import FailedTool
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -414,7 +416,7 @@ class ToolAgentLoop(AgentLoopBase):
             # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
-            tool = self.tools[tool_name]
+            tool = self.tools[tool_name] if tool_name != 'failed_tool' else FailedTool
             kwargs = tools_kwargs.get(tool_name, {})
             instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
             tool_execution_response, tool_reward, res = await tool.execute(instance_id, tool_args)
