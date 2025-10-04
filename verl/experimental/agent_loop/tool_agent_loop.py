@@ -426,7 +426,7 @@ class ToolAgentLoop(AgentLoopBase):
                     0.0,
                     {},
                 )
-            else
+            else:
                 tool = self.tools[tool_name]
                 kwargs = tools_kwargs.get(tool_name, {})
                 instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
