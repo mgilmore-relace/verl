@@ -10,7 +10,7 @@ import json
 class FailedTool(BaseTool):
 
     def __init__(self):
-        pass
+        return None
 
     @rollout_trace_op
     async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[ToolResponse, float, dict]:
