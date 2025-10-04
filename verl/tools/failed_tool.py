@@ -8,6 +8,9 @@ import demjson3
 
 class FailedTool(BaseTool):
 
+    def __init__(self):
+        pass
+
     @rollout_trace_op
     async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[ToolResponse, float, dict]:
         failed_call = parameters['input']

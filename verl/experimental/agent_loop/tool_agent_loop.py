@@ -98,10 +98,7 @@ class ToolAgentLoop(AgentLoopBase):
         tool_config_path = config.actor_rollout_ref.rollout.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
         cls.tools = {tool.name: tool for tool in tool_list}
-        cls.tools['failed_tool'] = FailedTool(
-            {},
-            True
-        )
+        cls.tools['failed_tool'] = FailedTool()
         cls.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
         cls.tool_parser = ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.format, cls.tokenizer, tool_list)
         print(f"Initialized tools: {cls.tools}")
