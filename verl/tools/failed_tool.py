@@ -1,5 +1,6 @@
 from .base_tool import BaseTool
 from .schemas import ToolResponse
+from verl.utils.rollout_trace import rollout_trace_op
 
 import demjson3
 
