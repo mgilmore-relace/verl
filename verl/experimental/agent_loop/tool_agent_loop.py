@@ -29,7 +29,7 @@ from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 
-from verl.tools.failed_tool import FailedTool
+# from verl.tools.failed_tool import FailedTool
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -98,7 +98,7 @@ class ToolAgentLoop(AgentLoopBase):
         tool_config_path = config.actor_rollout_ref.rollout.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
         cls.tools = {tool.name: tool for tool in tool_list}
-        cls.tools['failed_tool'] = FailedTool()
+        # cls.tools['failed_tool'] = FailedTool()
         cls.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
         cls.tool_parser = ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.format, cls.tokenizer, tool_list)
         print(f"Initialized tools: {cls.tools}")
@@ -417,10 +417,20 @@ class ToolAgentLoop(AgentLoopBase):
             # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
-            tool = self.tools[tool_name]
-            kwargs = tools_kwargs.get(tool_name, {})
-            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
-            tool_execution_response, tool_reward, res = await tool.execute(instance_id, tool_args)
+            if tool_name == 'failed_tool'
+                logger.warning(f"Error when executing tool due to invalid json: {tool_args['error']}")
+                return (
+                    ToolResponse(
+                        text=f"Error when executing tool due to invalid json: {tool_args['error']}",
+                    ),
+                    0.0,
+                    {},
+                )
+            else
+                tool = self.tools[tool_name]
+                kwargs = tools_kwargs.get(tool_name, {})
+                instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+                tool_execution_response, tool_reward, res = await tool.execute(instance_id, tool_args)
         except Exception as e:
             logger.warning(f"Error when executing tool: {e}")
             return (
