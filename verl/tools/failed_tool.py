@@ -5,6 +5,7 @@ from .schemas import ToolResponse
 from verl.utils.rollout_trace import rollout_trace_op
 
 import demjson3
+import json
 
 class FailedTool(BaseTool):
 
@@ -23,8 +24,8 @@ class FailedTool(BaseTool):
             mes = e.message
         
         try:
-            fix = demjson3.decode(failed_call)
+            fix = json.dumps(demjson3.decode(failed_call))
         except:
             return ToolResponse(f"Error when executing tool: tool call was in invalid JSON\nError Message: {mes}"), 0.0, {}
-        finally:
+        else:
             return ToolResponse(f"Error when executing tool: tool call was in invalid JSON\nError Message: {mes}\nPotential Fix: {fix}"), 0.0, {}
