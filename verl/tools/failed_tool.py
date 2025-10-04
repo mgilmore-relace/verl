@@ -25,6 +25,6 @@ class FailedTool(BaseTool):
         try:
             fix = demjson3.decode(failed_call)
         except:
-            return ToolResponse(f"Error when executing tool: tool call was in invalid JSON\nError Message: {e.message}"), 0.0, {}
+            return ToolResponse(f"Error when executing tool: tool call was in invalid JSON\nError Message: {mes}"), 0.0, {}
         finally:
-            return ToolResponse(f"Error when executing tool: tool call was in invalid JSON\nError Message: {e.message}\nPotential Fix: {fix}"), 0.0, {}
+            return ToolResponse(f"Error when executing tool: tool call was in invalid JSON\nError Message: {mes}\nPotential Fix: {fix}"), 0.0, {}
