@@ -15,6 +15,8 @@ class FailedTool(BaseTool):
     async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[ToolResponse, float, dict]:
         failed_call = parameters['input']
 
+        print("failed tool call")
+
         try:
             demjson3.decode(failed_call, strict=True)
         except demjson3.JSONDecodeError as e:
