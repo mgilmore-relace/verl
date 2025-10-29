@@ -153,7 +153,7 @@ class Qwen3CoderToolParser(ToolParser):
 
             function = config["function"]
             if function["name"] == func_name:
-                return function.parameters['properties']
+                return function["parameters"]['properties']
 
         logger.warning("Tool '%s' is not defined in the tools list.",
                        func_name)
