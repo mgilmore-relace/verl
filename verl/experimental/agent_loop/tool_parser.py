@@ -150,12 +150,9 @@ class Qwen3CoderToolParser(ToolParser):
         if len(self.tool_list) == 0:
             return {}
         for config in self.tool_list:
-            if not hasattr(config, "tool_schema") or not hasattr(config.tool_schema, "function"):
-                continue
 
-            function = config.function
-            if function.name == func_name:
-
+            function = config["function"]
+            if function["name"] == func_name:
                 return function.parameters['properties']
 
         logger.warning("Tool '%s' is not defined in the tools list.",
