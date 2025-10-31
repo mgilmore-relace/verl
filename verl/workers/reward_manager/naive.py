@@ -86,6 +86,9 @@ class NaiveRewardManager(AbstractRewardManager):
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
+            if "messages" in data_item.non_tensor_batch:
+                extra_info["messages"] = data.non_tensor_batch["messages"]
+
             score = self.compute_score(
                 data_source=data_source,
                 solution_str=response_str,
