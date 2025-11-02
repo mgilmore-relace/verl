@@ -292,7 +292,7 @@ class TaskRunner:
 
         # Create training and validation datasets.
         tool_config_path = config.actor_rollout_ref.rollout.multi_turn.tool_config_path
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor is_train=True, tool_config_path=tool_config_path)
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True, tool_config_path=tool_config_path)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False, tool_config_path=tool_config_path)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
