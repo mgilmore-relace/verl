@@ -25,6 +25,7 @@ import regex as re
 from pydantic import BaseModel
 
 from verl.utils.rollout_trace import rollout_trace_op
+import verl.tools.schemas as tool_schemas
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -150,10 +151,20 @@ class Qwen3CoderToolParser(ToolParser):
         if len(self.tool_list) == 0:
             return {}
         for config in self.tool_list:
+            if not hasattr(config, "tool_schema") or not hasattr(config.tool_schema, "function"):
+                continue
 
-            function = config["function"]
-            if function["name"] == func_name:
-                return function["parameters"]['properties']
+            function = config.tool_schema.function
+            if function.name == func_name:
+                if not isinstance(function, tool_schemas.OpenAIFunctionSchema):
+                    return {}
+
+                
+                params = function.parameters
+
+                return {
+                    k: dict(v) for k, v in params.properties.items()
+                }
 
         logger.warning("Tool '%s' is not defined in the tools list.",
                        func_name)
