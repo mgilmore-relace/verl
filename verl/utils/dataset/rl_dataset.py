@@ -30,6 +30,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
+from verl.tools.utils.tool_registry import initialize_tools_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class RLHFDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
+        tool_config_path: Optional[str] = None
     ):
         if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
@@ -117,6 +119,9 @@ class RLHFDataset(Dataset):
         self.filter_prompts = config.get("filter_prompts", True)
         self.serialize_dataset = False
         self.return_multi_modal_inputs = config.get("return_multi_modal_inputs", True)
+
+        tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
+        self.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
 
         self._download()
         self._read_files_and_tokenize()
@@ -148,6 +153,7 @@ class RLHFDataset(Dataset):
             prompt_key = self.prompt_key
             image_key = self.image_key
             video_key = self.video_key
+            tools = self.tool_schemas
 
             if processor is not None:
                 from verl.utils.dataset.vision_utils import process_image, process_video
@@ -155,7 +161,7 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     messages = self._build_messages(doc)
                     raw_prompt = self.processor.apply_chat_template(
-                        messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+                        messages, add_generation_prompt=True, tokenize=False, tools=tools, **self.apply_chat_template_kwargs
                     )
                     images = (
                         [process_image(image) for image in doc[image_key]]
@@ -175,7 +181,7 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     return len(
                         tokenizer.apply_chat_template(
-                            doc[prompt_key], add_generation_prompt=True, **self.apply_chat_template_kwargs
+                            doc[prompt_key], add_generation_prompt=True, tools=tools, **self.apply_chat_template_kwargs
                         )
                     )
 
