@@ -85,6 +85,7 @@ class NaiveRewardManager(AbstractRewardManager):
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
+            extra_info["response_length"] = valid_response_length
 
             if "messages" in data_item.non_tensor_batch:
                 extra_info["messages"] = data.non_tensor_batch["messages"]
