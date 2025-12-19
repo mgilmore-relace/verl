@@ -16,12 +16,16 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Optional
+import ast
+from typing import Optional, Any
 
 import regex
+import regex as re
 from pydantic import BaseModel
 
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.rollout_trace import rollout_trace_op
+import verl.tools.schemas as tool_schemas
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -60,10 +64,10 @@ class ToolParser(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_tool_parser(cls, name: str, tokenizer):
+    def get_tool_parser(cls, name: str, tokenizer, tool_list: Optional[list] = []) -> "ToolParser":
         if name not in cls._registry:
             raise ValueError(f"Unknown tool parser: {name}")
-        return cls._registry[name](tokenizer)
+        return cls._registry[name](tokenizer, tool_list)
 
     @classmethod
     def register(cls, name: str):
@@ -161,3 +165,211 @@ class GptOssToolParser(ToolParser):
         content = regex.sub(self.tool_call_pattern, "", text)
 
         return content, function_calls
+
+
+@ToolParser.register("qwen3_coder")
+class Qwen3CoderToolParser(ToolParser):
+
+    def __init__(self, tokenizer, tool_list: Optional[list] = []):
+        super().__init__(tokenizer, tool_list)
+        self.current_tool_name_sent: bool = False
+        self.prev_tool_call_arr: list[dict] = []
+        # Override base class type - we use string IDs for tool calls
+        self.current_tool_id: Optional[str] = None  # type: ignore
+        self.streamed_args_for_tool: list[str] = []
+
+        # Sentinel tokens for streaming mode
+        self.tool_call_start_token: str = "<tool_call>"
+        self.tool_call_end_token: str = "</tool_call>"
+        self.tool_call_prefix: str = "<function="
+        self.function_end_token: str = "</function>"
+        self.parameter_prefix: str = "<parameter="
+        self.parameter_end_token: str = "</parameter>"
+        self.is_tool_call_started: bool = False
+        self.failed_count: int = 0
+
+        # Regex patterns
+        self.tool_call_complete_regex = re.compile(
+            r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        self.tool_call_regex = re.compile(
+            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*?)$", re.DOTALL)
+        self.tool_call_function_regex = re.compile(
+            r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL)
+        self.tool_call_parameter_regex = re.compile(
+            r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
+            re.DOTALL)
+
+    
+
+    def _get_arguments_config(self, func_name: str) -> dict:
+        """Extract argument configuration for a function."""
+        if len(self.tool_list) == 0:
+            return {}
+        for config in self.tool_list:
+            if not hasattr(config, "tool_schema") or not hasattr(config.tool_schema, "function"):
+                continue
+
+            function = config.tool_schema.function
+            if function.name == func_name:
+                if not isinstance(function, tool_schemas.OpenAIFunctionSchema):
+                    return {}
+
+                
+                params = function.parameters
+
+                return {
+                    k: dict(v) for k, v in params.properties.items()
+                }
+
+        logger.warning("Tool '%s' is not defined in the tools list.",
+                       func_name)
+        return {}
+
+    def _convert_param_value(self, param_value: str, param_name: str,
+                             param_config: dict, func_name: str) -> Any:
+        """Convert parameter value based on its type in the schema."""
+        # Handle null value for any type
+        if param_value.lower() == "null":
+            return None
+
+        if param_name not in param_config:
+            if param_config != {}:
+                logger.warning(
+                    "Parsed parameter '%s' is not defined in the tool "
+                    "parameters for tool '%s', directly returning the "
+                    "string value.", param_name, func_name)
+            return param_value
+
+        if isinstance(param_config[param_name],
+                      dict) and "type" in param_config[param_name]:
+            param_type = str(param_config[param_name]["type"]).strip().lower()
+        else:
+            param_type = "string"
+        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
+            return param_value
+        elif param_type.startswith("int") or param_type.startswith(
+                "uint") or param_type.startswith(
+                    "long") or param_type.startswith(
+                        "short") or param_type.startswith("unsigned"):
+            try:
+                return int(param_value)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' is not an "
+                    "integer in tool '%s', degenerating to string.",
+                    param_value, param_name, func_name)
+                return param_value
+        elif param_type.startswith("num") or param_type.startswith("float"):
+            try:
+                float_param_value = float(param_value)
+                return float_param_value if float_param_value - int(
+                    float_param_value) != 0 else int(float_param_value)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' is not a float "
+                    "in tool '%s', degenerating to string.", param_value,
+                    param_name, func_name)
+                return param_value
+        elif param_type in ["boolean", "bool", "binary"]:
+            param_value = param_value.lower()
+            if param_value not in ["true", "false"]:
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' is not a boolean "
+                    "(`true` or `false`) in tool '%s', degenerating to "
+                    "false.", param_value, param_name, func_name)
+            return param_value == "true"
+        else:
+            if param_type in ["object", "array", "arr"
+                              ] or param_type.startswith(
+                                  "dict") or param_type.startswith("list"):
+                try:
+                    param_value = json.loads(param_value)
+                    return param_value
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.warning(
+                        "Parsed value '%s' of parameter '%s' cannot be "
+                        "parsed with json.loads in tool '%s', will try "
+                        "other methods to parse it.", param_value, param_name,
+                        func_name)
+            try:
+                param_value = ast.literal_eval(param_value)  # safer
+            except (ValueError, SyntaxError, TypeError):
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' cannot be "
+                    "converted via Python `ast.literal_eval()` in tool "
+                    "'%s', degenerating to string.", param_value, param_name,
+                    func_name)
+            return param_value
+
+    def _parse_xml_function_call(self, function_call_str: str) -> dict[str, Any]:
+
+        # Extract function name
+        end_index = function_call_str.index(">")
+        function_name = function_call_str[:end_index]
+        param_config = self._get_arguments_config(function_name)
+        parameters = function_call_str[end_index + 1:]
+        param_dict = {}
+        for match_text in self.tool_call_parameter_regex.findall(parameters):
+            idx = match_text.index(">")
+            param_name = match_text[:idx]
+            param_value = str(match_text[idx + 1:])
+            # Remove prefix and trailing \n
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            param_dict[param_name] = self._convert_param_value(
+                param_value, param_name, param_config, function_name)
+        return {
+            "name": function_name,
+            "arguments": param_dict
+        }
+
+    def _get_function_calls(self, model_output: str) -> list[str]:
+        # Find all tool calls
+        matched_ranges = self.tool_call_regex.findall(model_output)
+        raw_tool_calls = [
+            match[0] if match[0] else match[1] for match in matched_ranges
+        ]
+
+        # Back-off strategy if no tool_call tags found
+        if len(raw_tool_calls) == 0:
+            raw_tool_calls = [model_output]
+
+        raw_function_calls = []
+        for tool_call in raw_tool_calls:
+            raw_function_calls.extend(
+                self.tool_call_function_regex.findall(tool_call))
+
+        function_calls = [
+            match[0] if match[0] else match[1] for match in raw_function_calls
+        ]
+        return function_calls
+
+    @rollout_trace_op
+    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
+        # Quick check to avoid unnecessary processing
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+        if self.tool_call_prefix not in text:
+            return text, []
+
+        function_calls = self._get_function_calls(text)
+        if len(function_calls) == 0:
+            return text, []
+
+        parse_function_calls = []
+        
+        for match in function_calls:
+            try:
+                function_call = self._parse_xml_function_call(match)
+                name, arguments = function_call["name"], function_call["arguments"]
+                parse_function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+            except Exception as e:
+                logger.error(f"Failed to decode tool call: {e}")
+
+        # Extract content before tool calls
+        content = self.tool_call_regex.sub("", text)
+
+        return content, parse_function_calls
