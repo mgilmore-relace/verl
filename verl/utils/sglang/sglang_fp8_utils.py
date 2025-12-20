@@ -43,6 +43,7 @@ def should_quantize_param(param_name: str) -> bool:
         "norm",  # Various Norm layers
         "ln_",  # LayerNorm variants
         "embeddings",  # Embeddings
+        "gate.weight"
     ]
 
     # Check if matches exclude patterns
@@ -62,7 +63,7 @@ def should_quantize_param(param_name: str) -> bool:
         "down_proj",  # Down projection (for MLP)
         "fc1",  # Fully connected 1
         "fc2",  # Fully connected 2
-        "gate",  # Gate (for MoE)
+        # "gate",  # Gate (for MoE)
         "mlp",  # MLP layers
     ]
 
@@ -83,6 +84,12 @@ def scaled_fp8_blockwise(
 ):
     # cast tensor from high precision to FP8 with 128*128 blockwise quantization.
     assert len(data_hp.shape) == 2, "Only 2d input tensor is supported"
+
+    if torch.distributed.get_rank() == 0:
+        d0_ok = data_hp.shape[0] % 128 == 0
+        d1_ok = data_hp.shape[1] % 128 == 0
+        if not (d0_ok and d1_ok):
+            print(f"[FP8 BLOCK ERROR] shape={data_hp.shape}, dim0_div_128={d0_ok}, dim1_div_128={d1_ok}")
 
     block_size1 = weight_block_size[1]
     block_size0 = weight_block_size[0]
@@ -153,6 +160,9 @@ def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
         raise ValueError("weight_block_size not found in quant_config")
 
     for k, v in weights:
+        if torch.distributed.get_rank() == 0:
+            print(f"[FP8 DEBUG] {k}: shape={v.shape}, quantize={should_quantize_param(k)}")
+
         # Check if quantization is needed
         if not should_quantize_param(k):
             weights_quantized.append((k, v))
@@ -175,8 +185,6 @@ def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
                     "Only blockwise quantization is supported. Please set weight_block_size in quant_config"
                 )
         except Exception as e:
-            logger.error(f"Failed to quantize {k}: {e}")
-            # If quantization fails, use original weights
-            weights_quantized.append((k, v))
+            raise RuntimeError(f"[FP8 CRASH] Failed to quantize {k}, shape={v.shape}: {e}")
 
     return weights_quantized
