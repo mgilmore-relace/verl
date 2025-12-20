@@ -24,9 +24,8 @@ import regex as re
 from pydantic import BaseModel
 
 from verl.utils.ray_utils import get_event_loop
-from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.rollout_trace import tool_parser_trace_op
 import verl.tools.schemas as tool_schemas
-from verl.utils.rollout_trace import rollout_trace_op
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -90,7 +89,7 @@ class HermesToolParser(ToolParser):
         self.tool_call_end_token: str = "</tool_call>"
         self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
 
-    @rollout_trace_op
+    @tool_parser_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
         text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
@@ -137,7 +136,7 @@ class GptOssToolParser(ToolParser):
             regex.DOTALL,
         )
 
-    @rollout_trace_op
+    @tool_parser_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
         loop = get_event_loop()
         # We need to keep special tokens for gpt-oss model for better tool call extraction.
@@ -348,7 +347,7 @@ class Qwen3CoderToolParser(ToolParser):
         ]
         return function_calls
 
-    @rollout_trace_op
+    @tool_parser_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
         # Quick check to avoid unnecessary processing
         loop = asyncio.get_running_loop()
@@ -397,7 +396,7 @@ class Glm4MoeModelToolParser(ToolParser):
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
         )
 
-    @rollout_trace_op
+    @tool_parser_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
         def _is_string_type(
             tool_name: str,

@@ -289,3 +289,106 @@ def rollout_trace_op(func):
             return func(self, *args, **kwargs)
 
     return async_wrapper if inspect.iscoroutinefunction(func) else wrapper
+
+
+def tool_parser_trace_op(func):
+    """Tracing decorator specifically for tool parsers.
+
+    This decorator:
+    - Sets trace input to the decoded text (not raw token IDs)
+    - Formats output using MLflow ChatMessage structures for rich UI rendering
+
+    Expected function signature: async def extract_tool_calls(self, responses_ids: list[int])
+    Expected return type: tuple[str, list[FunctionCall]]
+    """
+
+    @functools.wraps(func)
+    async def async_wrapper(self, *args, **kwargs):
+        if not _trace_enabled.get():
+            return await func(self, *args, **kwargs)
+
+        backend = RolloutTraceConfig.get_backend()
+        if backend is None:
+            return await func(self, *args, **kwargs)
+
+        # Get response_ids from args
+        sig = inspect.signature(func)
+        bound_args = sig.bind(self, *args, **kwargs)
+        bound_args.apply_defaults()
+        arguments = dict(bound_args.arguments)
+        responses_ids = arguments.get("responses_ids", [])
+
+        # Decode token IDs to text for the input trace
+        loop = get_event_loop()
+        decoded_text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+
+        if backend == "weave":
+            tracer = RolloutTraceConfig.get_client()
+            from weave.trace.context import call_context
+
+            cur_attributes = {**call_context.call_attributes.get()}
+            inputs = {"decoded_text": decoded_text}
+            call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
+            try:
+                result = await func(self, *args, **kwargs)
+                content, function_calls = result
+
+                # Format output for Weave
+                output = {
+                    "content": content,
+                    "tool_calls": [
+                        {"type": "function", "function": {"name": fc.name, "arguments": fc.arguments}}
+                        for fc in function_calls
+                    ],
+                }
+                tracer.finish_call(call, output=output)
+                return result
+            except Exception as e:
+                tracer.finish_call(call, exception=e)
+                raise e
+
+        elif backend == "mlflow":
+            import mlflow
+
+            with mlflow.start_span(name=func.__qualname__) as span:
+                from mlflow.types.chat import ChatMessage, Function
+                # Set input as the decoded text in a user message format
+                span.set_inputs(decoded_text)
+
+                result = await func(self, *args, **kwargs)
+                content, function_calls = result
+
+                # Format tool calls for MLflow UI
+                tool_calls = []
+                for i, fc in enumerate(function_calls):
+                    tool_calls.append({
+                        "id": f"call_{i}",
+                        "type": "function",
+                        "function": {"name": fc.name, "arguments": fc.arguments},
+                    })
+
+                # Create assistant message with tool calls
+                output_message = {"role": "assistant", "content": content}
+                if tool_calls:
+                    output_message["tool_calls"] = tool_calls
+
+                # Also set structured outputs for the span
+                span.set_outputs(
+                    ChatMessage(
+                        role="assistant",
+                        content=content,
+                        tool_calls=[
+                            Function(
+                                name=fc.name,
+                                arguments=fc.arguments,
+                            ).to_tool_call()
+                            for fc in function_calls
+                        ],
+                    )
+                )
+
+                return result
+        else:
+            return await func(self, *args, **kwargs)
+
+    return async_wrapper
