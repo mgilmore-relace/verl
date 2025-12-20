@@ -21,7 +21,6 @@ from typing import Any, Optional
 
 import regex
 import regex as re
-import xml2dict
 from pydantic import BaseModel
 
 import verl.tools.schemas as tool_schemas
