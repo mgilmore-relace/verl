@@ -525,12 +525,28 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 await asyncio.sleep(0)
 
                 # Operating Mode Selection:
-                # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
+                # - use_rollout_logprobs_as_old: Sets old_log_probs = rollout_log_probs, preserves user's loss_mode
+                # - Bypass mode: Sets old_log_probs = rollout_log_probs, forces loss_mode to "bypass_mode"
                 # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
                 #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                 rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+                use_rollout_logprobs_as_old = (
+                    rollout_corr_config and rollout_corr_config.get("use_rollout_logprobs_as_old", False)
+                )
                 bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-                if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+
+                if use_rollout_logprobs_as_old:
+                    # Use rollout_log_probs as old_log_probs, but preserve user's loss_mode (e.g., gspo)
+                    # Note: Rejection sampling based on old_log_probs vs rollout_log_probs would be trivial
+                    # (ratio = 1.0) so we skip it. RS during training uses π_current vs π_rollout instead.
+                    if "rollout_log_probs" not in batch.batch:
+                        raise ValueError(
+                            "use_rollout_logprobs_as_old=True requires rollout_log_probs in batch. "
+                            "Ensure rollout worker is configured with calculate_log_probs=true."
+                        )
+                    batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+
+                elif bypass_recomputing_logprobs:  # Use `rollout_log_probs` with forced bypass_mode loss
                     from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
                     apply_bypass_mode(
@@ -601,11 +617,13 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
                     # Compute rollout correction: IS weights, rejection sampling, and metrics
                     # Only runs in decoupled mode (computes once per batch using stable π_old)
-                    # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
+                    # In bypass mode or use_rollout_logprobs_as_old mode, this is skipped
+                    # (rejection sampling already applied above if configured)
                     if (
                         rollout_corr_config is not None
                         and "rollout_log_probs" in batch.batch
-                        and not bypass_recomputing_logprobs  # Only in decoupled mode
+                        and not bypass_recomputing_logprobs  # Skip in bypass mode
+                        and not use_rollout_logprobs_as_old  # Skip if already handled above
                     ):
                         from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
