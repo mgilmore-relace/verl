@@ -119,6 +119,14 @@ class RolloutCorrectionConfig(BaseConfig):
               Uses standard PPO loss with IS weight correction
             Default: False (decoupled mode)
 
+        use_rollout_logprobs_as_old (bool): Skip actor forward pass for old_log_probs.
+            - True: Set old_log_probs = rollout_log_probs (skips expensive forward pass)
+              Unlike bypass_mode, this preserves the user's loss_mode setting (gspo, vanilla, etc.)
+            - False: Compute old_log_probs via actor forward pass (standard behavior)
+            This is useful when you want to use rollout engine logprobs but still use
+            custom loss functions like GSPO. Requires rollout.calculate_log_probs=true.
+            Default: False
+
         loss_type (str): Loss function type in bypass mode (bypass_mode=True).
             - "reinforce": REINFORCE-style policy gradient with explicit IS weights
               L = -E[w * log π(a|s) * A] where w = π_current / π_rollout
@@ -168,6 +176,7 @@ class RolloutCorrectionConfig(BaseConfig):
     rollout_rs_threshold_lower: Optional[float] = None
     rollout_token_veto_threshold: Optional[float] = None
     bypass_mode: bool = False
+    use_rollout_logprobs_as_old: bool = False
     loss_type: str = "ppo_clip"
     rollout_is_batch_normalize: bool = False
 
