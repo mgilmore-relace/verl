@@ -76,8 +76,11 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
         non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
     )
 
-    # Setting selected agent, that supports partial
-    if config.actor_rollout_ref.rollout.multi_turn.enable:
+    # Setting selected agent, that supports partial.
+    # Allow custom agent_names assuming partial generation is implemented.
+    if full_batch.non_tensor_batch.get("agent_name", None):
+        pass
+    elif config.actor_rollout_ref.rollout.multi_turn.enable:
         full_batch.non_tensor_batch["agent_name"] = np.array(
             ["async_partial_tool_agent"] * len(full_batch), dtype=object
         )
