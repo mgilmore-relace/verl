@@ -145,7 +145,22 @@ class ParameterSynchronizer:
             ray.get(self.validate_task)
         print(f"[ParameterSynchronizer] Wait last validate cost: {time.time() - start_time:.2f} seconds")
 
+    def pause_rollouter(self):
+        """Pause the rollouter and wait for active tasks to drain."""
+        print("[ParameterSynchronizer] Pausing rollouter for checkpoint...")
+        ray.get(self.rollouter.pause.remote())
+        print("[ParameterSynchronizer] Rollouter paused")
+
+    def resume_rollouter(self):
+        """Resume the rollouter after checkpoint."""
+        print("[ParameterSynchronizer] Resuming rollouter...")
+        ray.get(self.rollouter.resume.remote())
+        print("[ParameterSynchronizer] Rollouter resumed")
+
     def rollouter_save_checkpoint(self, local_global_step_folder: str):
-        """Trigger rollout to save checkpoint(dataloader)"""
+        """Trigger rollout to save checkpoint(dataloader).
+
+        Note: The rollouter should be paused before calling this method to avoid deadlocks.
+        """
         print(f"[ParameterSynchronizer] Triggering checkpoint save at {local_global_step_folder} ...")
         return ray.get(self.rollouter.save_checkpoint.remote(local_global_step_folder))

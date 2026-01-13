@@ -433,7 +433,18 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 self.current_param_version,
                 max_ckpt_to_keep=max_critic_ckpt_to_keep,
             )
-        ray.get(self.param_synchronizer.rollouter_save_checkpoint.remote(local_global_step_folder))
+        # Pause rollouter before saving its checkpoint to avoid deadlocks.
+        # This ensures no async tasks are running that could block save_checkpoint.
+        ray.get(self.param_synchronizer.pause_rollouter.remote())
+        try:
+            ray.get(self.param_synchronizer.rollouter_save_checkpoint.remote(local_global_step_folder))
+        except Exception as e:
+            print(f"[FullyAsyncTrainer] Error saving rollouter checkpoint: {e}")
+            raise
+        finally:
+            # Always resume rollouter, even if checkpoint saving fails
+            ray.get(self.param_synchronizer.resume_rollouter.remote())
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
