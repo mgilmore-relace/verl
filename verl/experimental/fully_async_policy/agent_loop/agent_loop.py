@@ -331,3 +331,56 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
+
+    def generate_sequences(self, prompts: DataProto) -> DataProto:
+        """Synchronous method for validation that properly handles async wake_up/sleep.
+
+        This method overrides the parent's generate_sequences to fix the async/sync mismatch
+        that causes deadlocks. The parent class calls wake_up()/sleep() without await,
+        but in FullyAsyncAgentLoopManager these are async methods.
+
+        Args:
+            prompts (DataProto): Input batch.
+
+        Returns:
+            DataProto: Output batch.
+        """
+
+        def _run_async(coro):
+            """Run an async coroutine from sync context, handling nested event loops."""
+            try:
+                asyncio.get_running_loop()
+                # We're inside a running event loop - create a new thread to run the coroutine
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, coro)
+                    return future.result()
+            except RuntimeError:
+                # No running event loop - safe to use asyncio.run()
+                return asyncio.run(coro)
+
+        # Fix for Issue #4147: Always call wake_up() to ensure weight sync
+        _run_async(self.wake_up())
+        if self.reward_model_manager:
+            self.reward_model_manager.wake_up()
+
+        chunks = prompts.chunk(len(self.agent_loop_workers))
+        outputs = ray.get(
+            [
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
+            ]
+        )
+        output = DataProto.concat(outputs)
+
+        # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
+        _run_async(self.sleep())
+        if self.reward_model_manager:
+            self.reward_model_manager.sleep()
+
+        # calculate performance metrics
+        metrics = [o.meta_info.pop("metrics") for o in outputs]  # List[List[Dict[str, str]]]
+        timing = self._performance_metrics(metrics, output)
+
+        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        return output
