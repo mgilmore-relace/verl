@@ -160,8 +160,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.running = True
         self.monitor_loop_trigger = True
 
-        # Add dataloader lock
-        self.dataloader_lock = asyncio.Lock()
+        # dataloader_lock will be initialized in _init_async_objects() to ensure correct event loop
+        self.dataloader_lock = None
 
         # Initialize async queues
         self.pending_queue = asyncio.Queue(maxsize=128)
@@ -177,6 +177,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         # is the most robust workaround.
         self.condition = asyncio.Condition()
         self.lock = self.condition._lock
+        self.dataloader_lock = asyncio.Lock()
 
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
