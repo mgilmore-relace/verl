@@ -968,6 +968,7 @@ class RayPPOTrainer:
 
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        print(f"Loading custom AgentLoopManager: {manager_class_fqn}")
         if manager_class_fqn:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
