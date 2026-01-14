@@ -179,6 +179,41 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.lock = self.condition._lock
         self.dataloader_lock = asyncio.Lock()
 
+    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
+        """Override to use num_workers=0 for validation dataloader.
+
+        Inside Ray actors, using multiprocessing workers (num_workers > 0) causes deadlocks
+        due to fork() inheriting lock states from the parent process. The worker processes
+        then hang trying to acquire locks that appear locked in the forked state.
+
+        This override calls the parent implementation then recreates val_dataloader with
+        num_workers=0 to avoid the fork deadlock.
+        """
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
+
+        # Call parent implementation
+        super()._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+        # Recreate val_dataloader with num_workers=0 to avoid fork deadlock in Ray actors
+        val_batch_size = self.config.data.val_batch_size
+        if val_batch_size is None:
+            val_batch_size = len(self.val_dataset)
+
+        if collate_fn is None:
+            collate_fn = default_collate_fn
+
+        print("[FullyAsyncRollouter] Recreating val_dataloader with num_workers=0 to avoid fork deadlock")
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            batch_size=val_batch_size,
+            num_workers=0,  # CRITICAL: Must be 0 inside Ray actors to avoid fork deadlock
+            shuffle=self.config.data.get("validation_shuffle", True),
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
         async with self.lock:
