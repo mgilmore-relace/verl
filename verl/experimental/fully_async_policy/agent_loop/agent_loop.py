@@ -339,6 +339,10 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         that causes deadlocks. The parent class calls wake_up()/sleep() without await,
         but in FullyAsyncAgentLoopManager these are async methods.
 
+        CRITICAL: The agent loop workers have max_concurrency=1 by default and are running
+        the continuous _run_agent_loop task. We must cancel those loops before calling
+        generate_sequences on the workers, otherwise the request will be queued forever.
+
         Args:
             prompts (DataProto): Input batch.
 
@@ -358,28 +362,54 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             """Synchronously sleep all replicas using ray.get()."""
             ray.get([server.sleep.remote() for replica in self.rollout_replicas for server in replica.servers])
 
-        # Fix for Issue #4147: Always call wake_up() to ensure weight sync
-        _sync_wake_up()
-        if self.reward_model_manager:
-            self.reward_model_manager.wake_up()
+        def _sync_cancel():
+            """Synchronously cancel all agent loops to free up workers for validation."""
+            # Cancel worker agent loops - they have max_concurrency=1 so we need to
+            # stop the running _run_agent_loop task before generate_sequences can execute
+            print("[FullyAsyncAgentLoopManager] Cancelling agent loops for validation...")
+            ray.get([worker.cancel_agent_loops.remote() for worker in self.agent_loop_workers])
+            # Cancel rollout replicas
+            ray.get([server.cancel.remote() for replica in self.rollout_replicas for server in replica.servers])
+            print("[FullyAsyncAgentLoopManager] Agent loops cancelled")
 
-        chunks = prompts.chunk(len(self.agent_loop_workers))
-        outputs = ray.get(
-            [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
-            ]
-        )
-        output = DataProto.concat(outputs)
+        def _sync_resume():
+            """Synchronously resume all agent loops after validation."""
+            print("[FullyAsyncAgentLoopManager] Resuming agent loops after validation...")
+            # Resume rollout replicas first
+            ray.get([server.resume.remote() for replica in self.rollout_replicas for server in replica.servers])
+            # Resume worker agent loops
+            ray.get([worker.resume_agent_loops.remote() for worker in self.agent_loop_workers])
+            print("[FullyAsyncAgentLoopManager] Agent loops resumed")
 
-        # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
-        _sync_sleep()
-        if self.reward_model_manager:
-            self.reward_model_manager.sleep()
+        # CRITICAL: Cancel agent loops first so workers are free to process generate_sequences
+        _sync_cancel()
 
-        # calculate performance metrics
-        metrics = [o.meta_info.pop("metrics") for o in outputs]  # List[List[Dict[str, str]]]
-        timing = self._performance_metrics(metrics, output)
+        try:
+            # Fix for Issue #4147: Always call wake_up() to ensure weight sync
+            _sync_wake_up()
+            if self.reward_model_manager:
+                self.reward_model_manager.wake_up()
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
-        return output
+            chunks = prompts.chunk(len(self.agent_loop_workers))
+            outputs = ray.get(
+                [
+                    worker.generate_sequences.remote(chunk)
+                    for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
+                ]
+            )
+            output = DataProto.concat(outputs)
+
+            # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
+            _sync_sleep()
+            if self.reward_model_manager:
+                self.reward_model_manager.sleep()
+
+            # calculate performance metrics
+            metrics = [o.meta_info.pop("metrics") for o in outputs]  # List[List[Dict[str, str]]]
+            timing = self._performance_metrics(metrics, output)
+
+            output.meta_info = {"timing": timing, **outputs[0].meta_info}
+            return output
+        finally:
+            # Always resume agent loops, even if validation fails
+            _sync_resume()
