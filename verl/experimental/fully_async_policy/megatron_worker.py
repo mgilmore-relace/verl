@@ -241,6 +241,9 @@ class DetachAsyncRolloutWorker(DetachNcclSync):
     def __init__(self, config: DictConfig, role: str):
         print(f"[DetachAsyncRolloutWorker] {DetachAsyncRolloutWorker.__mro__}")
         ActorRolloutRefWorker.__init__(self, config, role)
+        # Initialize bridge to None since DetachAsyncRolloutWorker skips MegatronWorker.__init__
+        # which normally sets this. The bridge is used in rollout_mode() for weight export.
+        self.bridge = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_actor_weights_info(self, weights_info):
