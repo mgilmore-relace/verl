@@ -662,6 +662,8 @@ class RayPPOTrainer:
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
+            assert len(test_gen_batch), "Validation batch is empty!"
+
             # pad to be divisible by dp_size
             size_divisor = (
                 self.actor_rollout_wg.world_size
