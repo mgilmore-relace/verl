@@ -245,6 +245,24 @@ class DetachAsyncRolloutWorker(DetachNcclSync):
         # which normally sets this. The bridge is used in rollout_mode() for weight export.
         self.bridge = None
 
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    async def wake_up(self):
+        """Override wake_up for detached workers.
+
+        Detached rollout workers don't need hybrid engine context switching
+        (rollout_mode/trainer_mode) since they don't share GPU resources with
+        the trainer. They use NCCL sync for weight updates instead.
+        """
+        return True
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    async def sleep(self):
+        """Override sleep for detached workers.
+
+        Detached rollout workers don't need hybrid engine context switching.
+        """
+        return True
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_actor_weights_info(self, weights_info):
         assert self._is_rollout
