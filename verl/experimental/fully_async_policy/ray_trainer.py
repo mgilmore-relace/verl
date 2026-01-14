@@ -57,6 +57,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
+        print("FullyAsyncRayPPOTrainer: Initializing workers...")
         self._init_resource_pools()
         self._create_worker_classes()
         self._init_worker_groups()

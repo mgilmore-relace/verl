@@ -437,6 +437,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             config=self.config,
             worker_group=self.rollout_wg,
         )
+        print("Using FullyAsyncAgentLoopManager as async_rollout_manager")
+        print("MRO" + pformat(FullyAsyncAgentLoopManager.mro()))
 
     # Add samples to the pending_queue
     async def _feed_samples(self):

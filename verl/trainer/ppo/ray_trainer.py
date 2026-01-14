@@ -661,6 +661,7 @@ class RayPPOTrainer:
                 "global_steps": self.global_steps,
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            breakpoint()
 
             assert len(test_gen_batch), "Validation batch is empty!"
 
@@ -670,10 +671,14 @@ class RayPPOTrainer:
                 if not self.async_rollout_mode
                 else self.config.actor_rollout_ref.rollout.agent.num_workers
             )
+            print("pad_dataproto_to_divisor start")
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+            print("pad_dataproto_to_divisor end")
             if not self.async_rollout_mode:
+                print("not self.async_rollout_mode generate_sequences start")
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
+                print("yes self.async_rollout_mode generate_sequences start")
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             # unpad
