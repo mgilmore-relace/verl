@@ -76,7 +76,7 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         return output
 
 
-@ray.remote
+@ray.remote(max_concurrency=2)
 class FullyAsyncAgentLoopWorker(AgentLoopWorker):
     def __init__(
         self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], reward_router_address: str = None
