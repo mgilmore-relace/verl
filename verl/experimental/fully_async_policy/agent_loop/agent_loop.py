@@ -346,21 +346,20 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             DataProto: Output batch.
         """
 
-        def _run_async(coro):
-            """Run an async coroutine from sync context, handling nested event loops."""
-            try:
-                asyncio.get_running_loop()
-                # We're inside a running event loop - create a new thread to run the coroutine
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result()
-            except RuntimeError:
-                # No running event loop - safe to use asyncio.run()
-                return asyncio.run(coro)
+        def _sync_wake_up():
+            """Synchronously wake up all replicas using ray.get()."""
+            # Each replica's wake_up() calls worker.wake_up.remote() internally.
+            # We need to call the replica servers directly with ray.get() since
+            # Ray ObjectRefs are only awaitable in Ray's event loop, not in a
+            # separate thread's asyncio.run().
+            ray.get([server.wake_up.remote() for replica in self.rollout_replicas for server in replica.servers])
+
+        def _sync_sleep():
+            """Synchronously sleep all replicas using ray.get()."""
+            ray.get([server.sleep.remote() for replica in self.rollout_replicas for server in replica.servers])
 
         # Fix for Issue #4147: Always call wake_up() to ensure weight sync
-        _run_async(self.wake_up())
+        _sync_wake_up()
         if self.reward_model_manager:
             self.reward_model_manager.wake_up()
 
@@ -374,7 +373,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         output = DataProto.concat(outputs)
 
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
-        _run_async(self.sleep())
+        _sync_sleep()
         if self.reward_model_manager:
             self.reward_model_manager.sleep()
 
