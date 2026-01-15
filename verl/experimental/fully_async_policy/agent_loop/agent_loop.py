@@ -225,7 +225,8 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.rollout_replicas = None
         self.server_handles = None
         self.server_addresses = None
-        self.agent_loop_workers = None
+        self.agent_loop_workers = None  # For streaming rollouts
+        self.validation_workers = None  # Separate workers for validation (no cancel/resume needed)
 
     @classmethod
     async def create(
@@ -243,7 +244,8 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             self.reward_router_address = self.reward_model_manager.get_router_address()
 
         await self._initialize_llm_servers_async()
-        self._init_agent_loop_workers()
+        self._init_agent_loop_workers()  # Streaming workers (FullyAsyncAgentLoopWorker)
+        self._init_validation_workers()  # Validation workers (base AgentLoopWorker)
 
     async def _initialize_llm_servers_async(self):
         rollout_world_size = (
@@ -284,6 +286,31 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             if rollout_config.disable_log_stats:
                 raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
             await asyncio.to_thread(update_prometheus_config, rollout_config.prometheus, self.server_addresses)
+
+    def _init_validation_workers(self):
+        """Initialize separate validation workers using base AgentLoopWorker.
+
+        These workers are used ONLY for validation and don't interfere with
+        streaming rollout workers. This eliminates the need for complex
+        cancel/resume coordination during validation.
+        """
+        from uuid import uuid4
+
+        self.validation_workers = []
+        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+
+        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+        for i in range(num_workers):
+            node_id = node_ids[i % len(node_ids)]
+            self.validation_workers.append(
+                AgentLoopWorker.options(
+                    name=f"validation_worker_{i}" + f"_{uuid4().hex[:8]}",
+                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                        node_id=node_id, soft=True
+                    ),
+                ).remote(self.config, self.server_handles, self.reward_router_address)
+            )
+        print(f"[FullyAsyncAgentLoopManager] Created {num_workers} validation workers (separate from streaming)")
 
     async def generate_single_sample_async(
         self,
@@ -333,15 +360,14 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
-        """Synchronous method for validation that properly handles async wake_up/sleep.
+        """Synchronous validation using separate validation workers.
 
-        This method overrides the parent's generate_sequences to fix the async/sync mismatch
-        that causes deadlocks. The parent class calls wake_up()/sleep() without await,
-        but in FullyAsyncAgentLoopManager these are async methods.
+        This method uses dedicated validation workers (AgentLoopWorker) that are
+        completely separate from the streaming workers (FullyAsyncAgentLoopWorker).
+        This eliminates all cancel/resume coordination and avoids deadlocks.
 
-        CRITICAL: The agent loop workers have max_concurrency=1 by default and are running
-        the continuous _run_agent_loop task. We must cancel those loops before calling
-        generate_sequences on the workers, otherwise the request will be queued forever.
+        The validation workers share the same vLLM server handles but don't
+        interfere with streaming rollouts.
 
         Args:
             prompts (DataProto): Input batch.
@@ -349,67 +375,32 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         Returns:
             DataProto: Output batch.
         """
+        print("[FullyAsyncAgentLoopManager] Starting validation with separate workers...")
 
-        def _sync_wake_up():
-            """Synchronously wake up all replicas using ray.get()."""
-            # Each replica's wake_up() calls worker.wake_up.remote() internally.
-            # We need to call the replica servers directly with ray.get() since
-            # Ray ObjectRefs are only awaitable in Ray's event loop, not in a
-            # separate thread's asyncio.run().
-            ray.get([server.wake_up.remote() for replica in self.rollout_replicas for server in replica.servers])
+        # Wake up servers for validation (weight sync if needed)
+        ray.get([server.wake_up.remote() for replica in self.rollout_replicas for server in replica.servers])
+        if self.reward_model_manager:
+            self.reward_model_manager.wake_up()
 
-        def _sync_sleep():
-            """Synchronously sleep all replicas using ray.get()."""
-            ray.get([server.sleep.remote() for replica in self.rollout_replicas for server in replica.servers])
+        # Use validation workers (separate from streaming workers - no cancel/resume needed!)
+        chunks = prompts.chunk(len(self.validation_workers))
+        outputs = ray.get(
+            [
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.validation_workers, chunks, strict=True)
+            ]
+        )
+        output = DataProto.concat(outputs)
 
-        def _sync_cancel():
-            """Synchronously cancel all agent loops to free up workers for validation."""
-            # Cancel worker agent loops - they have max_concurrency=1 so we need to
-            # stop the running _run_agent_loop task before generate_sequences can execute
-            print("[FullyAsyncAgentLoopManager] Cancelling agent loops for validation...")
-            ray.get([worker.cancel_agent_loops.remote() for worker in self.agent_loop_workers])
-            # Cancel rollout replicas
-            ray.get([server.cancel.remote() for replica in self.rollout_replicas for server in replica.servers])
-            print("[FullyAsyncAgentLoopManager] Agent loops cancelled")
+        # Sleep servers after validation
+        ray.get([server.sleep.remote() for replica in self.rollout_replicas for server in replica.servers])
+        if self.reward_model_manager:
+            self.reward_model_manager.sleep()
 
-        def _sync_resume():
-            """Synchronously resume all agent loops after validation."""
-            print("[FullyAsyncAgentLoopManager] Resuming agent loops after validation...")
-            # Resume rollout replicas first
-            ray.get([server.resume.remote() for replica in self.rollout_replicas for server in replica.servers])
-            # Resume worker agent loops
-            ray.get([worker.resume_agent_loops.remote() for worker in self.agent_loop_workers])
-            print("[FullyAsyncAgentLoopManager] Agent loops resumed")
+        # Calculate performance metrics
+        metrics = [o.meta_info.pop("metrics") for o in outputs]  # List[List[Dict[str, str]]]
+        timing = self._performance_metrics(metrics, output)
 
-        # CRITICAL: Cancel agent loops first so workers are free to process generate_sequences
-        _sync_cancel()
-
-        try:
-            # Fix for Issue #4147: Always call wake_up() to ensure weight sync
-            _sync_wake_up()
-            if self.reward_model_manager:
-                self.reward_model_manager.wake_up()
-
-            chunks = prompts.chunk(len(self.agent_loop_workers))
-            outputs = ray.get(
-                [
-                    worker.generate_sequences.remote(chunk)
-                    for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
-                ]
-            )
-            output = DataProto.concat(outputs)
-
-            # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
-            _sync_sleep()
-            if self.reward_model_manager:
-                self.reward_model_manager.sleep()
-
-            # calculate performance metrics
-            metrics = [o.meta_info.pop("metrics") for o in outputs]  # List[List[Dict[str, str]]]
-            timing = self._performance_metrics(metrics, output)
-
-            output.meta_info = {"timing": timing, **outputs[0].meta_info}
-            return output
-        finally:
-            # Always resume agent loops, even if validation fails
-            _sync_resume()
+        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        print("[FullyAsyncAgentLoopManager] Validation complete")
+        return output

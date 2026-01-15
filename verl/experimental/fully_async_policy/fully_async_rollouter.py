@@ -480,6 +480,32 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         await self.pending_queue.put("DONE")
         print(f"[FullyAsyncRollouter][Feed] Sample addition is complete, {self.global_steps} samples have been added")
 
+    async def _wait_for_one_task(self):
+        """Wait for one active task to complete, without holding the lock during the wait.
+
+        This helper copies the active_tasks set under the lock, waits outside the lock,
+        then updates active_tasks under the lock. This prevents deadlock with pause()
+        which also needs to acquire the lock.
+
+        Returns True if a task was awaited, False if no tasks were available.
+        """
+        # Copy tasks under the lock
+        async with self.lock:
+            if not self.active_tasks:
+                return False
+            tasks_to_wait = set(self.active_tasks)
+
+        # Wait OUTSIDE the lock to allow pause() to acquire it
+        done_tasks, _ = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
+
+        # Process completed tasks and update active_tasks under the lock
+        async with self.lock:
+            for task in done_tasks:
+                self.active_tasks.discard(task)
+                await task  # Get result/exception
+
+        return True
+
     async def _processor_worker(self):
         """
         Streaming worker coroutines, a sample is submitted for processing without waiting for batches
@@ -491,15 +517,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 )
                 async with self.lock:
                     self.paused = True
+
+                # Wait for active tasks WITHOUT holding the lock to avoid deadlock with pause()
                 while self.active_tasks:
-                    async with self.lock:
-                        # After acquiring the lock, the number of active_tasks may change, need to be verified again
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                        for task in done_tasks:
-                            await task
+                    await self._wait_for_one_task()
 
                 async with self.lock:
                     while self.paused:
@@ -519,25 +540,15 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 print(
                     "[FullyAsyncRollouter][Processor] Received end signal, waiting for remaining tasks to complete..."
                 )
+                # Wait for active tasks WITHOUT holding the lock
                 while self.active_tasks:
-                    async with self.lock:
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                        for task in done_tasks:
-                            await task
+                    await self._wait_for_one_task()
                 break
 
             # Check whether the number of concurrent tasks exceeds the limit
+            # Wait WITHOUT holding the lock to avoid deadlock
             while len(self.active_tasks) >= self.max_concurrent_samples:
-                async with self.lock:
-                    if self.active_tasks:
-                        done_tasks, self.active_tasks = await asyncio.wait(
-                            self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
-                    for task in done_tasks:
-                        await task
+                await self._wait_for_one_task()
 
             # Submit single sample processing
             async with self.lock:
@@ -605,7 +616,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Wait for sample feed to complete
             # Use asyncio.wait to monitor all tasks. If processor exits early,
             # detect it instead of blocking on feed_task (it might be stuck on a full queue).
-            done, pending = await asyncio.wait(
+            done, _ = await asyncio.wait(
                 [self.feed_task, self.processor_task], return_when=asyncio.FIRST_COMPLETED
             )
 
@@ -732,17 +743,30 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     async def pause(self):
         """pause rollout"""
         print("[FullyAsyncRollouter][Public][Pause]")
+
+        # First, set pause flag and cancel rollout - hold lock briefly
         async with self.lock:
             self.paused = True
+            self.monitor_loop_trigger = False
             # Cancel all rollout tasks
             if self.config.async_training.partial_rollout:
                 await self.async_rollout_manager.cancel()
-            if self.active_tasks:
-                await asyncio.gather(*self.active_tasks, return_exceptions=True)
-                self.active_tasks.clear()
-                print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
-            await self.async_rollout_manager.clear_kv_cache()
-            self.monitor_loop_trigger = False
+            # Copy active_tasks to wait on them outside the lock
+            tasks_to_wait = set(self.active_tasks) if self.active_tasks else set()
+
+        # Wait for active tasks OUTSIDE the lock to avoid deadlock with _processor_worker
+        # which also holds the lock while waiting for tasks
+        if tasks_to_wait:
+            print(f"[FullyAsyncRollouter][Public][Pause] Waiting for {len(tasks_to_wait)} active tasks...")
+            await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+            print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
+
+        # Now clear KV cache - this doesn't need the lock
+        await self.async_rollout_manager.clear_kv_cache()
+
+        # Clear active_tasks under the lock
+        async with self.lock:
+            self.active_tasks.clear()
 
     async def resume(self, dependency_ref: ObjectRef = None):
         if dependency_ref is not None:
