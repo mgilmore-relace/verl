@@ -298,12 +298,14 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
         self.validation_workers = []
         num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+    
+        validation_worker_class = ray.remote(AgentLoopWorker)
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         for i in range(num_workers):
             node_id = node_ids[i % len(node_ids)]
             self.validation_workers.append(
-                AgentLoopWorker.options(
+                validation_worker_class.options(
                     name=f"validation_worker_{i}" + f"_{uuid4().hex[:8]}",
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
