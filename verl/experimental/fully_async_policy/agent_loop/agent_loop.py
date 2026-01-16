@@ -167,13 +167,15 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
             logger.exception("Agent_loop run failed")
             raise
 
-    async def cancel_agent_loops(self):
-        """Set the shared cancellation event to stop all agent loops."""
+    async def pause_agent_loops(self):
+        """Set the shared cancellation event and abort all active requests."""
         self.cancellation_event.set()
+        return await self.server_manager.sleep()
 
     async def resume_agent_loops(self):
-        """Clear the shared cancellation event."""
+        """Clear the shared cancellation event and allow new requests."""
         self.cancellation_event.clear()
+        await self.server_manager.wake_up()
 
 
 class FullyAsyncAgentLoopManager(AgentLoopManager):
@@ -281,12 +283,13 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self._worker_index = (self._worker_index + 1) % len(self.agent_loop_workers)
         return worker
 
-    async def cancel(self):
-        worker_cancel_tasks = [worker.cancel_agent_loops.remote() for worker in self.agent_loop_workers]
-        rollout_cancel_tasks = [replica.abort_all_requests() for replica in self.rollout_replicas]
-        await asyncio.gather(*rollout_cancel_tasks, *worker_cancel_tasks)
+    async def pause(self):
+        """Cancel all active requests from this manager's workers."""
+        worker_pause_tasks = [worker.pause_agent_loops.remote() for worker in self.agent_loop_workers]
+        await asyncio.gather(*worker_pause_tasks)
 
     async def resume(self):
+        """Resume this manager's workers and allow new requests."""
         worker_resume_tasks = [worker.resume_agent_loops.remote() for worker in self.agent_loop_workers]
         await asyncio.gather(*worker_resume_tasks)
 
