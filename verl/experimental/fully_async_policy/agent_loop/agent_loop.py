@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 from typing import Any, Optional
+from uuid import uuid4
 
 import hydra
 import numpy as np
@@ -186,14 +187,16 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.worker_group = worker_group
         self.reward_model_manager = None
         self.reward_router_address = None
-        self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
+        self.agent_loop_train_workers_class = FullyAsyncAgentLoopWorker
+        self.agent_loop_valid_workers_class = ray.remote(AgentLoopWorker)
         self.rollout_replica_class = vLLMReplica
 
         self.rm_resource_pool = rm_resource_pool
         self.rollout_replicas = None
         self.server_handles = None
         self.server_addresses = None
-        self.agent_loop_workers = None
+        self.agent_loop_train_workers = None
+        self.agent_loop_valid_workers = None
 
     @classmethod
     async def create(
@@ -212,6 +215,64 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
 
         await self._initialize_llm_servers_async()
         self._init_agent_loop_workers()
+
+    def _init_agent_loop_workers(self):
+        self.agent_loop_train_workers = []
+        self.agent_loop_valid_workers = []
+        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+
+        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+        for i in range(num_workers):
+            # Round-robin scheduling over the all nodes
+            node_id = node_ids[i % len(node_ids)]
+            self.agent_loop_train_workers.append(
+                self.agent_loop_train_workers_class.options(
+                    name=f"agent_loop_train_worker_{i}" + f"_{uuid4().hex[:8]}",
+                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                        node_id=node_id, soft=True
+                    ),
+                ).remote(self.config, self.server_handles, self.reward_router_address)
+            )
+            self.agent_loop_valid_workers.append(
+                self.agent_loop_valid_workers_class.options(
+                    name=f"agent_loop_valid_worker_{i}" + f"_{uuid4().hex[:8]}",
+                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                        node_id=node_id, soft=True
+                    ),
+                ).remote(self.config, self.server_handles, self.reward_router_address)
+            )
+
+    def generate_sequences(self, prompts: DataProto) -> DataProto:
+        """Split input batch and dispatch to agent loop workers.
+
+        Args:
+            prompts (DataProto): Input batch.
+
+        Returns:
+            DataProto: Output batch.
+        """
+
+        if self.reward_model_manager:
+            self.reward_model_manager.wake_up()
+
+        chunkes = prompts.chunk(len(self.agent_loop_valid_workers))
+        outputs = ray.get(
+            [
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.agent_loop_valid_workers, chunkes, strict=True)
+            ]
+        )
+        output = DataProto.concat(outputs)
+
+        if self.reward_model_manager:
+            self.reward_model_manager.sleep()
+
+        # calculate performance metrics
+        metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
+        timing = self._performance_metrics(metrics, output)
+
+        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        return output
 
     async def _initialize_llm_servers_async(self):
         rollout_world_size = (
@@ -279,18 +340,18 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         if not hasattr(self, "_worker_index"):
             self._worker_index = 0
 
-        worker = self.agent_loop_workers[self._worker_index]
-        self._worker_index = (self._worker_index + 1) % len(self.agent_loop_workers)
+        worker = self.agent_loop_train_workers[self._worker_index]
+        self._worker_index = (self._worker_index + 1) % len(self.agent_loop_train_workers)
         return worker
 
     async def pause(self):
         """Cancel all active requests from this manager's workers."""
-        worker_pause_tasks = [worker.pause_agent_loops.remote() for worker in self.agent_loop_workers]
+        worker_pause_tasks = [worker.pause_agent_loops.remote() for worker in self.agent_loop_train_workers]
         await asyncio.gather(*worker_pause_tasks)
 
     async def resume(self):
         """Resume this manager's workers and allow new requests."""
-        worker_resume_tasks = [worker.resume_agent_loops.remote() for worker in self.agent_loop_workers]
+        worker_resume_tasks = [worker.resume_agent_loops.remote() for worker in self.agent_loop_train_workers]
         await asyncio.gather(*worker_resume_tasks)
 
     async def wake_up(self):
