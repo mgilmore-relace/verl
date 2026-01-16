@@ -123,14 +123,14 @@ class AsyncLLMServerManager:
             if self._active is False:
                 # Return early with abort status instead of starting new work
                 return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="abort")
-            self._request_ledger[generation_request_id] = asyncio.create_task(
+            self._request_ledger[generation_request_id] = asyncio.wrap_future(
                 server.generate.remote(
                     request_id=generation_request_id,
                     prompt_ids=prompt_ids,
                     sampling_params=sampling_params,
                     image_data=image_data,
                     video_data=video_data,
-                )
+                ).future()
             )
 
         try:
@@ -149,10 +149,6 @@ class AsyncLLMServerManager:
         async with self._request_lock:
             self._active = False
             to_abort = dict(self._request_ledger)
-
-        # Abort outside the lock (allows in-flight requests to complete and clean up)
-        abort_tasks = [server.abort_request.remote(req_id) for req_id, server in to_abort.items()]
-        await asyncio.gather(*abort_tasks, return_exceptions=True)
 
         # Only remove what we tried to abort (new requests during abort stay tracked)
         async with self._request_lock:
