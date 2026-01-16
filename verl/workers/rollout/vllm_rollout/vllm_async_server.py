@@ -471,66 +471,74 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
-        # Calculate the maximum possible new tokens based on available context space
-        # This serves as a safety upper bound
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-        if max_possible_tokens < 0:
-            raise ValueError(
-                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
-                f"({self.config.max_model_len})."
-            )
-
-        # Determine max_tokens from sampling_params or use configured response_length as default
-        if "max_tokens" in sampling_params:
-            max_tokens = sampling_params.pop("max_tokens")
-        elif "max_new_tokens" in sampling_params:
-            # support sglang-style 'max_new_tokens' param
-            max_tokens = sampling_params.pop("max_new_tokens")
-        else:
-            # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
-
-        # Clamp max_tokens to the valid range [0, max_possible_tokens]
-        max_tokens = max(0, min(max_tokens, max_possible_tokens))
-
-        assert max_tokens <= max_possible_tokens, (
-            f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
-        )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
-        sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-        sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-        multi_modal_data = {}
-        if image_data is not None:
-            multi_modal_data["image"] = image_data
-        if video_data is not None:
-            multi_modal_data["video"] = video_data
-
-        prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
-
-        # Add lora request
-        lora_request = None
-        if self.model_config.lora_rank > 0:
-            # Make sure we also check that the lora is already loaded in the engine
-            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
-            if lora_loaded:
-                lora_request = LoRARequest(
-                    lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+        try:
+            # Calculate the maximum possible new tokens based on available context space
+            # This serves as a safety upper bound
+            max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+            if max_possible_tokens < 0:
+                raise ValueError(
+                    f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
+                    f"({self.config.max_model_len})."
                 )
 
-        generator = self.engine.generate(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            lora_request=lora_request,
-            priority=priority,
-        )
+            # Determine max_tokens from sampling_params or use configured response_length as default
+            if "max_tokens" in sampling_params:
+                max_tokens = sampling_params.pop("max_tokens")
+            elif "max_new_tokens" in sampling_params:
+                # support sglang-style 'max_new_tokens' param
+                max_tokens = sampling_params.pop("max_new_tokens")
+            else:
+                # Default to a calculation that considers configured lengths
+                max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
 
-        # Get final response
-        final_res: Optional[RequestOutput] = None
-        async for output in generator:
-            final_res = output
-        assert final_res is not None
+            # Clamp max_tokens to the valid range [0, max_possible_tokens]
+            max_tokens = max(0, min(max_tokens, max_possible_tokens))
+
+            assert max_tokens <= max_possible_tokens, (
+                f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
+            )
+            sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+            sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+            sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+            prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            multi_modal_data = {}
+            if image_data is not None:
+                multi_modal_data["image"] = image_data
+            if video_data is not None:
+                multi_modal_data["video"] = video_data
+
+            prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
+
+            # Add lora request
+            lora_request = None
+            if self.model_config.lora_rank > 0:
+                # Make sure we also check that the lora is already loaded in the engine
+                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+                if lora_loaded:
+                    lora_request = LoRARequest(
+                        lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+                    )
+
+            generator = self.engine.generate(
+                prompt=prompt,
+                sampling_params=sampling_params,
+                request_id=request_id,
+                lora_request=lora_request,
+                priority=priority,
+            )
+
+            # Get final response
+            final_res: Optional[RequestOutput] = None
+            async for output in generator:
+                final_res = output
+            assert final_res is not None
+        except asyncio.CancelledError:
+            # Note any coroutines after the exception should be shielded to ensure they run
+            await asyncio.shield(self.abort_request(request_id))
+
+        if final_res is None:
+            log_probs = None if sampling_params.logprobs is None else []
+            return TokenOutput(token_ids=[], log_probs=log_probs, stop_reason="aborted")
 
         token_ids = final_res.outputs[0].token_ids
         log_probs = None

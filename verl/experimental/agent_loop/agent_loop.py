@@ -80,6 +80,11 @@ class AsyncLLMServerManager:
         # LRU cache to map request_id to server
         self.request_id_to_server = LRUCache(maxsize=max_cache_size)
 
+        # Track active request_ids mapped to server for cancellation
+        self._request_ledger: dict[str, asyncio.Task] = {}
+        self._request_lock = asyncio.Lock()
+        self._active = True
+
     def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
         # TODO: implement server pressure awareness load balancing
         if request_id in self.request_id_to_server:
@@ -112,14 +117,56 @@ class AsyncLLMServerManager:
             TokenOutput: token output
         """
         server = self._choose_server(request_id)
-        output = await server.generate.remote(
-            request_id=uuid4().hex,  # use new request_id for each turn
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-            video_data=video_data,
-        )
-        return output
+        generation_request_id = uuid4().hex
+
+        async with self._request_lock:
+            if self._active is False:
+                # Return early with abort status instead of starting new work
+                return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="abort")
+            self._request_ledger[generation_request_id] = asyncio.create_task(
+                server.generate.remote(
+                    request_id=generation_request_id,
+                    prompt_ids=prompt_ids,
+                    sampling_params=sampling_params,
+                    image_data=image_data,
+                    video_data=video_data,
+                )
+            )
+
+        try:
+            return await self._request_ledger[generation_request_id]
+        finally:
+            async with self._request_lock:
+                self._request_ledger.pop(generation_request_id, None)
+
+    async def sleep(self) -> dict[str, Any]:
+        """Abort all active requests tracked by this server manager.
+
+        Returns:
+            dict with aborted_count and request_ids
+        """
+        # Snapshot under lock and set cancelling flag to reject new requests
+        async with self._request_lock:
+            self._active = False
+            to_abort = dict(self._request_ledger)
+
+        # Abort outside the lock (allows in-flight requests to complete and clean up)
+        abort_tasks = [server.abort_request.remote(req_id) for req_id, server in to_abort.items()]
+        await asyncio.gather(*abort_tasks, return_exceptions=True)
+
+        # Only remove what we tried to abort (new requests during abort stay tracked)
+        async with self._request_lock:
+            for req_id in to_abort:
+                task = self._request_ledger.pop(req_id, None)
+                if task:
+                    task.cancel()
+
+        return {"aborted_count": len(to_abort), "request_ids": list(to_abort.keys())}
+
+    async def wake_up(self):
+        """Reset cancelling flag to allow new requests."""
+        async with self._request_lock:
+            self._active = True
 
 
 class AgentLoopMetrics(BaseModel):

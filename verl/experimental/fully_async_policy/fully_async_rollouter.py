@@ -745,7 +745,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             self.paused = True
             # Cancel all rollout tasks
             if self.config.async_training.partial_rollout:
-                await self.async_rollout_manager.cancel()
+                await self.async_rollout_manager.pause()
             if self.active_tasks:
                 await asyncio.gather(*self.active_tasks, return_exceptions=True)
                 self.active_tasks.clear()
