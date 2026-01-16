@@ -169,45 +169,28 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         add_messages: list[dict[str, Any]] = []
 
         with simple_timer("generate_sequences", agent_data.metrics):
-            # partial interface
-            if self.enable_partial_rollout:
-                response_ids, log_probs, is_cancel = await self.server_manager.generate_for_partial(
-                    request_id=agent_data.request_id,
-                    prompt_ids=agent_data.prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=agent_data.image_data,
-                )
+            output = await self.server_manager.generate(
+                request_id=agent_data.request_id,
+                prompt_ids=agent_data.prompt_ids,
+                sampling_params=sampling_params,
+                image_data=agent_data.image_data,
+            )
 
-                if is_cancel:
-                    # Save the generated parts
-                    agent_data.response_ids = response_ids
-                    agent_data.prompt_ids += agent_data.response_ids
-                    agent_data.response_mask += [1] * len(response_ids)
-                    if log_probs:
-                        agent_data.response_logprobs += log_probs
-                    if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
-                        # If response_length has reached the limit,
-                        # it is considered to have ended normally.
-                        agent_data.assistant_turns += 1
-                        return AgentState.TERMINATED
-                    return AgentState.GENERATING
-            else:
-                # original generate interface
-                output = await self.server_manager.generate(
-                    request_id=agent_data.request_id,
-                    prompt_ids=agent_data.prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=agent_data.image_data,
-                )
-                response_ids = output.token_ids
-                log_probs = output.log_probs
-
-        agent_data.assistant_turns += 1
-        agent_data.response_ids = response_ids
+        agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
-        if log_probs:
-            agent_data.response_logprobs += log_probs
+        if output.log_probs:
+            agent_data.response_logprobs += output.log_probs
+
+        if output.stop_reason == "abort":
+            if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
+                # If response_length has reached the limit,
+                # it is considered to have ended normally.
+                agent_data.assistant_turns += 1
+                return AgentState.TERMINATED
+            return AgentState.GENERATING
+        else:
+            agent_data.assistant_turns += 1
 
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
             return AgentState.TERMINATED

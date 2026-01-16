@@ -85,19 +85,23 @@ class PartialSingleTurnAgentLoop(AgentLoopBase):
                 # The samples without partial rollout are returned directly.
                 return output
         with simple_timer("generate_sequences", metrics):
-            response_ids, response_logprobs, is_cancel = await self.server_manager.generate_for_partial(
+            output_new = await self.server_manager.generate(
                 request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
             )
         if not output:
+            response_ids = output_new.token_ids
+            response_logprobs = output_new.log_probs
             response_mask = [1] * len(response_ids)
         else:
             # Pause the sample to be resumed, add the output result to response_ids, and reset response_mask
             prompt_ids = output.prompt_ids
-            response_logprobs = output.response_logprobs + response_logprobs
-            response_ids = output.response_ids + response_ids
+            response_logprobs = output.response_logprobs + output_new.log_probs
+            response_ids = output.response_ids + output_new.token_ids
             response_mask = [1] * len(response_ids)
         if len(response_ids) >= self.response_length:
             is_cancel = False
+        else:
+            is_cancel = output_new.stop_reason == "abort"
 
         return AgentLoopOutput(
             prompt_ids=prompt_ids,
