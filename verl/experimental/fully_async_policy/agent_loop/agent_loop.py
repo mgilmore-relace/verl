@@ -28,6 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopWorker,
     AsyncLLMServerManager,
     DictConfigWrap,
+    TrajectorySegment,
     _agent_loop_registry,
     get_trajectory_info,
 )
@@ -122,6 +123,37 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         output.non_tensor_batch["tool_calls_times"] = tool_calls_times_list
         return output
 
+    def _extract_segment_from_agent_data(self, agent_data: Any, mask_before: int = 0) -> TrajectorySegment:
+        """Extract a TrajectorySegment from agent_data state.
+
+        Segments store cumulative data - all response_ids, logprobs, and routed_experts
+        generated up to this point. The response_mask is modified to mask out tokens
+        covered by previous segments.
+
+        Args:
+            agent_data: The agent data containing response state
+            mask_before: Index before which to zero out response_mask (tokens covered by previous segments)
+
+        Returns:
+            TrajectorySegment with cumulative data, response_mask zeroed for [0:mask_before]
+        """
+        response_mask = list(agent_data.response_mask)
+
+        # Mask out tokens covered by previous segments
+        for i in range(min(mask_before, len(response_mask))):
+            response_mask[i] = 0
+
+        # Extract full response from prompt_ids (response_ids is only the last chunk)
+        full_response = agent_data.prompt_ids[-len(agent_data.response_mask):] if agent_data.response_mask else []
+
+        return TrajectorySegment(
+            prompt_ids=agent_data.prompt_ids[:len(agent_data.prompt_ids) - len(agent_data.response_mask)],
+            response_ids=list(full_response),
+            response_mask=response_mask,
+            response_logprobs=list(agent_data.response_logprobs) if agent_data.response_logprobs else None,
+            routed_experts=agent_data.routed_experts,
+        )
+
     async def _partial_run_agent_loop(
         self,
         sampling_params: dict[str, Any],
@@ -134,6 +166,42 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
         if kwargs["output"] is not None and not kwargs["output"].extra_fields.get("is_cancel", False):
             logger.info("In _partial_run_agent_loop, already completed, return derictly!")
             return kwargs["output"]
+
+        # Check for param_version change and handle segment creation
+        prev_output = kwargs.get("output")
+        accumulated_segments = []
+        prev_segment_end = 0  # Track end of previous segment for masking
+        current_param_version = kwargs.get("param_version", 0)
+
+        if prev_output is not None and prev_output.extra_fields.get("is_cancel", False):
+            # Get accumulated segments from previous runs
+            accumulated_segments = prev_output.extra_fields.get("accumulated_segments", [])
+            prev_segment_end = prev_output.extra_fields.get("prev_segment_end", 0)
+            agent_data = prev_output.extra_fields.get("agent_data")
+
+            if agent_data is not None:
+                prev_param_version = agent_data.extra_fields.get("param_version_end", 0)
+
+                # If param_version changed, create segment and reset routed_experts
+                if current_param_version != prev_param_version and agent_data.routed_experts is not None:
+                    # Create cumulative segment, masking tokens covered by previous segments
+                    segment = self._extract_segment_from_agent_data(agent_data, mask_before=prev_segment_end)
+                    if len(segment.response_mask) > 0:
+                        accumulated_segments = accumulated_segments + [segment]
+                        # Update prev_segment_end for next segment
+                        prev_segment_end = len(agent_data.response_mask)
+
+                    # Reset routed_experts so the agent loop uses fresh expert selection
+                    agent_data.routed_experts = None
+
+                    # Update param_version_end so subsequent resumes with same version don't create spurious segments
+                    agent_data.extra_fields["param_version_end"] = current_param_version
+
+                    logger.info(
+                        f"[PartialToolAgent] Param version changed {prev_param_version} -> {current_param_version}, "
+                        f"created segment and reset routed_experts"
+                    )
+
         try:
             with rollout_trace_attr(
                 step=trajectory["step"],
@@ -159,7 +227,31 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                 output: AgentLoopOutput = await agent_loop.run(
                     sampling_params, cancellation_event=self.cancellation_event, **kwargs
                 )
-                if not output.extra_fields.get("is_cancel", False):
+
+                if output.extra_fields.get("is_cancel", False):
+                    # Store accumulated segments and prev_segment_end in cancelled output for next resume
+                    output.extra_fields["accumulated_segments"] = accumulated_segments
+                    output.extra_fields["prev_segment_end"] = prev_segment_end
+                else:
+                    # Completed - build final cumulative segment from the output fields
+                    if output.routed_experts is not None and len(output.response_mask) > 0:
+                        # Apply masking for tokens covered by previous segments
+                        final_response_mask = list(output.response_mask)
+                        for i in range(min(prev_segment_end, len(final_response_mask))):
+                            final_response_mask[i] = 0
+
+                        final_segment = TrajectorySegment(
+                            prompt_ids=output.prompt_ids,
+                            response_ids=list(output.response_ids),
+                            response_mask=final_response_mask,
+                            response_logprobs=list(output.response_logprobs)
+                            if output.response_logprobs else None,
+                            routed_experts=output.routed_experts,
+                        )
+                        accumulated_segments = accumulated_segments + [final_segment]
+
+                    output.segments = accumulated_segments if accumulated_segments else None
+
                     kwargs.pop("output", None)
                     output = await self._agent_loop_postprocess(output, **kwargs)
 

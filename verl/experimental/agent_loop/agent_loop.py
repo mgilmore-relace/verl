@@ -177,6 +177,30 @@ class AgentLoopMetrics(BaseModel):
     tool_calls: float = 0.0
 
 
+class TrajectorySegment(BaseModel):
+    """A contiguous portion of trajectory generated under a single policy.
+
+    Used for MoE models where expert selection needs to be tracked per-policy-version
+    to ensure correct gradient computation during training.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    prompt_ids: list[int] | torch.Tensor
+    """Prompt token ids."""
+    response_ids: list[int] | torch.Tensor
+    """Response token ids including LLM generated token, tool response token."""
+    response_mask: list[int] | torch.Tensor
+    """Response mask, 1 for LLM generated token, 0 for tool response token."""
+    response_logprobs: Optional[list[float] | torch.Tensor] = None
+    """Log probabilities for the response tokens."""
+    routed_experts: Optional[torch.Tensor] = None
+    """Routed experts for the total tokens."""
+    attention_mask: Optional[torch.Tensor] = None
+    """Attention mask for the full sequence (prompt + response)."""
+    position_ids: Optional[torch.Tensor] = None
+    """Position ids for the full sequence (prompt + response)."""
+
 class AgentLoopOutput(BaseModel):
     """Agent loop output."""
 
@@ -200,6 +224,8 @@ class AgentLoopOutput(BaseModel):
     """Auxiliary performance metrics"""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+    segments: Optional[list[TrajectorySegment]] = None
+    """Trajectory segments for multi-segment expert selection in MoE models."""
 
 
 class _InternalAgentLoopOutput(AgentLoopOutput):
@@ -563,6 +589,102 @@ class AgentLoopWorker:
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
 
+    def _pad_segments(
+        self,
+        segments: list[TrajectorySegment],
+        prompt_length: int,
+        response_length: int,
+    ) -> list[TrajectorySegment]:
+        """Pad segments to fixed lengths for optimization.
+
+        Args:
+            segments: List of TrajectorySegment with variable-length data
+            prompt_length: Target prompt length (left padded)
+            response_length: Target response length (right padded)
+
+        Returns:
+            List of TrajectorySegment with padded tensors
+        """
+        total_length = prompt_length + response_length
+        padded_segments = []
+
+        for segment in segments:
+            # Pad prompt_ids (left padding)
+            self.tokenizer.padding_side = "left"
+            prompt_output = self.tokenizer.pad(
+                {"input_ids": segment.prompt_ids},
+                padding="max_length",
+                max_length=prompt_length,
+                return_tensors="pt",
+                return_attention_mask=False,
+            )
+            padded_prompt_ids = prompt_output["input_ids"].squeeze(0)
+
+            # Pad response_ids (right padding)
+            self.tokenizer.padding_side = "right"
+            response_output = self.tokenizer.pad(
+                {"input_ids": segment.response_ids},
+                padding="max_length",
+                max_length=response_length,
+                return_tensors="pt",
+                return_attention_mask=False,
+            )
+            padded_response_ids = response_output["input_ids"].squeeze(0)
+
+            # Pad response_mask (right padding with 0s)
+            response_mask_output = self.tokenizer.pad(
+                {"input_ids": segment.response_mask},
+                padding="max_length",
+                max_length=response_length,
+                return_tensors="pt",
+                return_attention_mask=False,
+            )
+            padded_response_mask = response_mask_output["input_ids"].squeeze(0)
+
+            # Pad response_logprobs (right padding with 0.0)
+            padded_logprobs = None
+            if segment.response_logprobs is not None:
+                pad_size = response_length - len(segment.response_logprobs)
+                padded_logprobs = torch.tensor(segment.response_logprobs + [0.0] * pad_size)
+
+            # Pad routed_experts to total_length
+            padded_routed_experts = None
+            if segment.routed_experts is not None:
+                experts = segment.routed_experts
+                if isinstance(experts, np.ndarray):
+                    experts = torch.from_numpy(experts)
+
+                length, layer_num, topk_num = experts.shape
+                padded_routed_experts = torch.zeros(total_length, layer_num, topk_num, dtype=experts.dtype)
+
+                # Calculate start position accounting for left padding of prompt
+                start_pos = prompt_length - len(segment.prompt_ids)
+                end_pos = min(start_pos + length, total_length)
+                padded_routed_experts[start_pos:end_pos] = experts[:end_pos - start_pos]
+
+            # Compute attention_mask: 0 for padding, 1 for actual tokens
+            pad_token_id = self.tokenizer.pad_token_id
+            prompt_attention_mask = (padded_prompt_ids != pad_token_id).long()
+            response_attention_mask = (padded_response_ids != pad_token_id).long()
+            attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=0)
+
+            # Compute position_ids: sequential positions for non-padding tokens
+            position_ids = torch.zeros_like(attention_mask)
+            valid_mask = attention_mask.bool()
+            position_ids[valid_mask] = torch.arange(valid_mask.sum().item())
+
+            padded_segments.append(TrajectorySegment(
+                prompt_ids=padded_prompt_ids,
+                response_ids=padded_response_ids,
+                response_mask=padded_response_mask,
+                response_logprobs=padded_logprobs,
+                routed_experts=padded_routed_experts,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            ))
+
+        return padded_segments
+
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
@@ -667,6 +789,15 @@ class AgentLoopWorker:
             kwargs=kwargs,
         )
 
+        # Pad segments for optimization
+        padded_segments = None
+        if output.segments:
+            padded_segments = self._pad_segments(
+                output.segments,
+                prompt_length=self.config.actor_rollout_ref.rollout.prompt_length,
+                response_length=self.config.actor_rollout_ref.rollout.response_length,
+            )
+
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],
@@ -682,6 +813,7 @@ class AgentLoopWorker:
             num_turns=output.num_turns,
             metrics=output.metrics,
             extra_fields=output.extra_fields,
+            segments=padded_segments,
         )
 
     def _compute_multi_modal_inputs(self, output, input_ids) -> dict[str, torch.Tensor]:
@@ -836,6 +968,12 @@ class AgentLoopWorker:
             extra_fields[key] = temp_arr
 
         non_tensor_batch.update(extra_fields)
+
+        # Add trajectory segments for MoE per-segment expert selection
+        segments_list = [input.segments for input in inputs]
+        if any(s is not None for s in segments_list):
+            non_tensor_batch["trajectory_segments"] = np.array(segments_list, dtype=object)
+
         return DataProto(
             batch=batch,
             non_tensor_batch=non_tensor_batch,

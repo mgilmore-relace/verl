@@ -247,15 +247,10 @@ class ToolAgentLoop(AgentLoopBase):
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
 
-        # Accumulate routed experts for MoE routing consistency across turns
+        # vLLM returns routed experts for the entire sequence (prompt + response)
+        # Replace instead of concatenate since each call returns the full routing
         if output.routed_experts is not None:
-            if agent_data.routed_experts is None:
-                agent_data.routed_experts = output.routed_experts
-            else:
-                # Concatenate new routing with accumulated routing
-                agent_data.routed_experts = torch.cat(
-                    [agent_data.routed_experts, output.routed_experts], dim=0
-                )
+            agent_data.routed_experts = output.routed_experts
 
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:

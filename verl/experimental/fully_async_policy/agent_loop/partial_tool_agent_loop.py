@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import asyncio
 import copy
 import logging
@@ -20,6 +19,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import torch
+from pandas.tests.arrays.masked.test_arrow_compat import pa
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
@@ -63,7 +63,6 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         output: Optional[AgentLoopOutput] = kwargs.get("output", None)
         if output and output.extra_fields.get("is_cancel", False):
             agent_data, state = self._restore_from_output(output)
-
             logger.info(f"[PartialToolAgent] Resuming from {state.value}")
         else:
             if output and not output.extra_fields.get("is_cancel", False):
@@ -185,15 +184,10 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
 
-        # Accumulate routed experts for MoE routing consistency across turns
+        # vLLM returns routed experts for the entire sequence (prompt + response)
+        # Replace instead of concatenate since each call returns the full routing
         if output.routed_experts is not None:
-            if agent_data.routed_experts is None:
-                agent_data.routed_experts = output.routed_experts
-            else:
-                # Concatenate new routing with accumulated routing
-                agent_data.routed_experts = torch.cat(
-                    [agent_data.routed_experts, output.routed_experts], dim=0
-                )
+            agent_data.routed_experts = output.routed_experts
 
         if output.stop_reason == "abort":
             if not ignore_termination and len(agent_data.response_mask) >= self.response_length:

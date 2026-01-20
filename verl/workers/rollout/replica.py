@@ -36,7 +36,7 @@ class TokenOutput(BaseModel):
     log_probs: Optional[list[float]] = None
     """logprobs of response token ids"""
     routed_experts: Optional[Any] = None
-    """routed experts of response token ids"""
+    """routed experts for entire sequence (prompt + response). Shape: (seq_len, num_layers, topk)"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
 
