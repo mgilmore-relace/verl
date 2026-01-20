@@ -47,6 +47,112 @@ from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.rollout_skip import RolloutSkip
+from tensordict import TensorDict
+
+
+def expand_batch_with_segments(batch: DataProto) -> DataProto:
+    """Expand batch with trajectory segments for per-segment optimization.
+
+    For samples that have multiple segments (due to policy changes mid-generation),
+    this function expands the batch so each segment becomes its own sequence for
+    optimization. The advantages are shared across all segments of the same trajectory.
+
+    Args:
+        batch: The batch with computed advantages and optional trajectory_segments
+
+    Returns:
+        Expanded batch where each segment is a separate sequence, or original batch
+        if no segments present
+    """
+    trajectory_segments = batch.non_tensor_batch.get("trajectory_segments", None)
+    if trajectory_segments is None:
+        return batch
+
+    # Check if any samples have segments
+    has_segments = any(segs is not None and len(segs) > 0 for segs in trajectory_segments)
+    if not has_segments:
+        return batch
+
+    # Build expanded batch
+    expanded_batch_tensors = {key: [] for key in batch.batch.keys()}
+    expanded_non_tensor = {key: [] for key in batch.non_tensor_batch.keys() if key != "trajectory_segments"}
+
+    for i in range(len(batch)):
+        segments = trajectory_segments[i]
+        if segments is None or len(segments) == 0:
+            # No segments - use original data
+            for key in expanded_batch_tensors:
+                expanded_batch_tensors[key].append(batch.batch[key][i])
+            for key in expanded_non_tensor:
+                expanded_non_tensor[key].append(batch.non_tensor_batch[key][i])
+        else:
+            # Has segments - expand each segment as a separate sequence
+            # Get shared values from final trajectory (advantages, returns, etc.)
+            shared_advantages = batch.batch.get("advantages", None)
+            shared_returns = batch.batch.get("returns", None)
+
+            for segment in segments:
+                # Use segment's padded tensors for input data
+                expanded_batch_tensors["prompts"].append(segment.prompt_ids)
+                expanded_batch_tensors["responses"].append(segment.response_ids)
+                expanded_batch_tensors["response_mask"].append(segment.response_mask)
+
+                # Concatenate prompt + response for input_ids
+                if "input_ids" in expanded_batch_tensors:
+                    input_ids = torch.cat([segment.prompt_ids, segment.response_ids], dim=0)
+                    expanded_batch_tensors["input_ids"].append(input_ids)
+
+                # Use segment's attention_mask (computed during padding)
+                if "attention_mask" in expanded_batch_tensors and segment.attention_mask is not None:
+                    expanded_batch_tensors["attention_mask"].append(segment.attention_mask)
+
+                # Use segment's position_ids (computed during padding)
+                if "position_ids" in expanded_batch_tensors and segment.position_ids is not None:
+                    expanded_batch_tensors["position_ids"].append(segment.position_ids)
+
+                # Use segment's routed_experts if available
+                if "routed_experts" in expanded_batch_tensors and segment.routed_experts is not None:
+                    expanded_batch_tensors["routed_experts"].append(segment.routed_experts)
+
+                # Use segment's log probs (from vLLM during generation with correct policy)
+                if "rollout_log_probs" in expanded_batch_tensors and segment.response_logprobs is not None:
+                    expanded_batch_tensors["rollout_log_probs"].append(segment.response_logprobs)
+
+                # Share advantages and returns from the final trajectory
+                if shared_advantages is not None and "advantages" in expanded_batch_tensors:
+                    expanded_batch_tensors["advantages"].append(shared_advantages[i])
+                if shared_returns is not None and "returns" in expanded_batch_tensors:
+                    expanded_batch_tensors["returns"].append(shared_returns[i])
+
+                # Copy other tensor fields from original
+                for key in expanded_batch_tensors:
+                    if key not in ["prompts", "responses", "response_mask", "input_ids",
+                                   "attention_mask", "position_ids", "routed_experts",
+                                   "rollout_log_probs", "advantages", "returns"]:
+                        expanded_batch_tensors[key].append(batch.batch[key][i])
+
+                # Copy non-tensor fields
+                for key in expanded_non_tensor:
+                    expanded_non_tensor[key].append(batch.non_tensor_batch[key][i])
+
+    # Stack expanded tensors into TensorDict
+    stacked_batch = {}
+    for key, values in expanded_batch_tensors.items():
+        if len(values) > 0 and values[0] is not None:
+            stacked_batch[key] = torch.stack(values, dim=0)
+
+    # Convert non-tensor to arrays
+    stacked_non_tensor = {}
+    for key, values in expanded_non_tensor.items():
+        stacked_non_tensor[key] = np.array(values, dtype=object)
+
+    expanded_tensordict = TensorDict(stacked_batch, batch_size=len(stacked_batch.get("prompts", [])))
+
+    return DataProto(
+        batch=expanded_tensordict,
+        non_tensor_batch=stacked_non_tensor,
+        meta_info=batch.meta_info.copy(),
+    )
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
@@ -462,10 +568,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # implement critic warmup
         if self.config.trainer.critic_warmup <= self.global_steps:
+            # Expand batch with segments for per-segment optimization (MoE expert routing)
+            # Each segment becomes a separate sequence with shared advantages
+            actor_batch = expand_batch_with_segments(batch)
+
             # update actor
             with marked_timer("update_actor", timing_raw, color="red"):
-                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                actor_output = self.actor_rollout_wg.update_actor(batch)
+                actor_batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                actor_output = self.actor_rollout_wg.update_actor(actor_batch)
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_output_metrics)
         return batch, reward_extra_infos_dict
