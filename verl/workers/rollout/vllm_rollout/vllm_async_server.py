@@ -468,9 +468,26 @@ class vLLMHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        expert_selection: Optional[Any] = None,
         priority: int = 0,
     ) -> TokenOutput:
-        """Generate sequence with token-in-token-out."""
+        """Generate sequence with token-in-token-out.
+
+        Args:
+            prompt_ids: List of prompt token ids.
+            sampling_params: Sampling parameters.
+            request_id: Unique request identifier.
+            image_data: Optional list of image data for multi-modal models.
+            video_data: Optional list of video data for multi-modal models.
+            expert_selection: Pre-computed expert selections for prompt tokens.
+                Shape: (seq_len, num_layers, topk). Used as prefix cache key and
+                forced on cache miss for MoE consistency. Passed to vLLM which
+                manages the selection/caching.
+            priority: Request priority (higher = more important).
+
+        Returns:
+            TokenOutput containing generated tokens and optional routing information.
+        """
         try:
             # Calculate the maximum possible new tokens based on available context space
             # This serves as a safety upper bound
@@ -507,7 +524,11 @@ class vLLMHttpServer:
             if video_data is not None:
                 multi_modal_data["video"] = video_data
 
-            prompt = TokensPrompt(prompt_token_ids=prompt_ids, multi_modal_data=multi_modal_data)
+            prompt = TokensPrompt(
+                prompt_token_ids=prompt_ids,
+                multi_modal_data=multi_modal_data,
+                expert_selection=expert_selection,
+            )
 
             # Add lora request
             lora_request = None

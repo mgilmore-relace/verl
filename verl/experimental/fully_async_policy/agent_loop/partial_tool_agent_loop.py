@@ -19,6 +19,8 @@ import os
 from typing import Any, Optional
 from uuid import uuid4
 
+import torch
+
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
 from verl.utils.profiler import simple_timer
@@ -174,6 +176,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 prompt_ids=agent_data.prompt_ids,
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
+                expert_selection=agent_data.routed_experts,
             )
 
         agent_data.response_ids = output.token_ids
@@ -181,6 +184,16 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
+
+        # Accumulate routed experts for MoE routing consistency across turns
+        if output.routed_experts is not None:
+            if agent_data.routed_experts is None:
+                agent_data.routed_experts = output.routed_experts
+            else:
+                # Concatenate new routing with accumulated routing
+                agent_data.routed_experts = torch.cat(
+                    [agent_data.routed_experts, output.routed_experts], dim=0
+                )
 
         if output.stop_reason == "abort":
             if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
@@ -231,6 +244,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else None,
+            routed_experts=agent_data.routed_experts,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             extra_fields={},

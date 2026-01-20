@@ -105,6 +105,7 @@ class AsyncLLMServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        expert_selection: Optional[torch.Tensor] = None,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -112,6 +113,9 @@ class AsyncLLMServerManager:
             request_id (str): request id for sticky session.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+            expert_selection (Optional[torch.Tensor]): Pre-computed expert selections
+                for prompt tokens. Shape: (seq_len, num_layers, topk).
+                Used as prefix cache key and forced on cache miss for MoE consistency.
 
         Returns:
             TokenOutput: token output
@@ -130,6 +134,7 @@ class AsyncLLMServerManager:
                     sampling_params=sampling_params,
                     image_data=image_data,
                     video_data=video_data,
+                    expert_selection=expert_selection,
                 ).future()
             )
 
