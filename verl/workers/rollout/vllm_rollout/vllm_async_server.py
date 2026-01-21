@@ -64,23 +64,30 @@ from verl.workers.rollout.vllm_rollout.utils import (
     get_vllm_max_lora_rank,
 )
 
-_VLLM_VERSION = version.parse(vllm.__version__)
+# Handle dev versions (e.g., when installed from source without a tag)
+_VLLM_VERSION_STR = vllm.__version__
+_IS_DEV_VERSION = "dev" in _VLLM_VERSION_STR or not _VLLM_VERSION_STR[0].isdigit()
+if _IS_DEV_VERSION:
+    # Assume dev versions have latest features (v0.13.0+)
+    _VLLM_VERSION = version.parse("0.13.0")
+else:
+    _VLLM_VERSION = version.parse(_VLLM_VERSION_STR)
 
-if _VLLM_VERSION > version.parse("0.11.0"):
+if _VLLM_VERSION > version.parse("0.11.0") or _IS_DEV_VERSION:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.utils.network_utils import get_tcp_uri
 
-    if _VLLM_VERSION == version.parse("0.12.0"):
+    if _VLLM_VERSION == version.parse("0.12.0") and not _IS_DEV_VERSION:
         from vllm.entrypoints.harmony_utils import get_encoding
 
         get_encoding()
-    elif _VLLM_VERSION >= version.parse("0.13.0"):
+    elif _VLLM_VERSION >= version.parse("0.13.0") or _IS_DEV_VERSION:
         from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 
         get_encoding()
 else:
     from vllm.utils import FlexibleArgumentParser, get_tcp_uri
-if _VLLM_VERSION >= version.parse("0.12.0"):
+if _VLLM_VERSION >= version.parse("0.12.0") or _IS_DEV_VERSION:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
 
