@@ -26,6 +26,7 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 from tqdm import tqdm
 
 from verl import DataProto
@@ -47,7 +48,6 @@ from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.rollout_skip import RolloutSkip
-from tensordict import TensorDict
 
 
 def expand_batch_with_segments(batch: DataProto) -> DataProto:
@@ -126,9 +126,18 @@ def expand_batch_with_segments(batch: DataProto) -> DataProto:
 
                 # Copy other tensor fields from original
                 for key in expanded_batch_tensors:
-                    if key not in ["prompts", "responses", "response_mask", "input_ids",
-                                   "attention_mask", "position_ids", "routed_experts",
-                                   "rollout_log_probs", "advantages", "returns"]:
+                    if key not in [
+                        "prompts",
+                        "responses",
+                        "response_mask",
+                        "input_ids",
+                        "attention_mask",
+                        "position_ids",
+                        "routed_experts",
+                        "rollout_log_probs",
+                        "advantages",
+                        "returns",
+                    ]:
                         expanded_batch_tensors[key].append(batch.batch[key][i])
 
                 # Copy non-tensor fields

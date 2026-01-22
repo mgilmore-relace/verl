@@ -17,7 +17,7 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from uuid import uuid4
 
 import hydra
@@ -27,7 +27,7 @@ import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
@@ -212,6 +212,61 @@ class TrajectorySegment(BaseModel):
         return v
 
 
+class TrajectorySegmentManager:
+    segments: list[TrajectorySegment]
+
+    def __init__(self):
+        self.response_start = 0
+        self.segments = []
+
+    def add_segment(self, agent_data: "AgentLoopOutput"):
+        # handle routed_experts copying based on its type
+        match agent_data.routed_experts:
+            case torch.Tensor():
+                expert_selection = agent_data.routed_experts.clone()
+            case np.ndarray():
+                expert_selection = agent_data.routed_experts.copy()
+            case None:
+                expert_selection = None
+            case _:
+                raise TypeError(f"Unsupported type for routed_experts: {type(agent_data.routed_experts)}")
+
+        response_mask = [0] * self.response_start + agent_data.response_mask[self.response_start :]
+
+        if agent_data.response_logprobs is not None:
+            response_logprobs = [0.0] * self.response_start + agent_data.response_logprobs[self.response_start :]
+        else:
+            response_logprobs = None
+
+        # Create cumulative segment, masking tokens covered by previous segments
+        self.append(
+            TrajectorySegment(
+                prompt_ids=list(agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]),
+                response_ids=list(agent_data.response_ids),
+                response_mask=response_mask,
+                response_logprobs=response_logprobs,
+                routed_experts=expert_selection,
+            )
+        )
+
+        self.response_start = len(agent_data.response_ids)
+
+    def append(self, segment: TrajectorySegment) -> None:
+        self.segments.append(segment)
+
+    def __len__(self) -> int:
+        return len(self.segments)
+
+    def __getitem__(self, idx: int) -> TrajectorySegment:
+        return self.segments[idx]
+
+    def __iter__(self) -> Iterator[TrajectorySegment]:
+        return iter(self.segments)
+
+    def __bool__(self) -> bool:
+        return bool(self.segments)
+
+
 class AgentLoopOutput(BaseModel):
     """Agent loop output."""
 
@@ -233,10 +288,30 @@ class AgentLoopOutput(BaseModel):
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
-    extra_fields: dict[str, Any] = {}
+    extra_fields: dict[str, Any] = Field(default_factory=dict)
     """Extra fields for dynamic addition."""
-    segments: Optional[list[TrajectorySegment]] = None
+    segments: TrajectorySegmentManager = Field(default_factory=TrajectorySegmentManager)
     """Trajectory segments for multi-segment expert selection in MoE models."""
+
+    def save_segment(self, current_param_version: int) -> None:
+        """Save trajectory segment based on agent data."""
+        self.segments.add_segment(self)
+
+        self.routed_experts = None  # Clear routed_experts after saving segment
+
+        prev_param_version = self.extra_fields.get("param_version_end", 0)
+        self.extra_fields["param_version_end"] = current_param_version
+
+        if prev_param_version != current_param_version:
+            logger.info(
+                f"[AgentLoopOutput] Param version changed {prev_param_version} -> {current_param_version}, "
+                f"created segment and reset routed_experts, response_mask, response_logprobs."
+            )
+        else:
+            logger.info(
+                f"[AgentLoopOutput] loop finalized with {current_param_version}, "
+                f"created segment and reset routed_experts, response_mask, response_logprobs."
+            )
 
 
 class _InternalAgentLoopOutput(AgentLoopOutput):
@@ -652,11 +727,13 @@ class AgentLoopWorker:
             )
             padded_response_mask = response_mask_output["input_ids"].squeeze(0)
 
-            # Pad response_logprobs (right padding with 0.0)
+            # Pad response_logprobs (right padding with 0.0, truncate if too long)
             padded_logprobs = None
             if segment.response_logprobs is not None:
-                pad_size = response_length - len(segment.response_logprobs)
-                padded_logprobs = torch.tensor(segment.response_logprobs + [0.0] * pad_size)
+                # Truncate if longer than response_length, then pad
+                logprobs = list(segment.response_logprobs)[:response_length]
+                pad_size = response_length - len(logprobs)
+                padded_logprobs = torch.tensor(logprobs + [0.0] * pad_size)
 
             # Pad routed_experts to total_length
             padded_routed_experts = None
@@ -671,7 +748,7 @@ class AgentLoopWorker:
                 # Calculate start position accounting for left padding of prompt
                 start_pos = prompt_length - len(segment.prompt_ids)
                 end_pos = min(start_pos + length, total_length)
-                padded_routed_experts[start_pos:end_pos] = experts[:end_pos - start_pos]
+                padded_routed_experts[start_pos:end_pos] = experts[: end_pos - start_pos]
 
             # Compute attention_mask: 0 for padding, 1 for actual tokens
             pad_token_id = self.tokenizer.pad_token_id
@@ -684,15 +761,17 @@ class AgentLoopWorker:
             valid_mask = attention_mask.bool()
             position_ids[valid_mask] = torch.arange(valid_mask.sum().item())
 
-            padded_segments.append(TrajectorySegment(
-                prompt_ids=padded_prompt_ids,
-                response_ids=padded_response_ids,
-                response_mask=padded_response_mask,
-                response_logprobs=padded_logprobs,
-                routed_experts=padded_routed_experts,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-            ))
+            padded_segments.append(
+                TrajectorySegment(
+                    prompt_ids=padded_prompt_ids,
+                    response_ids=padded_response_ids,
+                    response_mask=padded_response_mask,
+                    response_logprobs=padded_logprobs,
+                    routed_experts=padded_routed_experts,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                )
+            )
 
         return padded_segments
 
