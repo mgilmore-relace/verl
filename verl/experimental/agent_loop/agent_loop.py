@@ -27,7 +27,7 @@ import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
@@ -194,12 +194,23 @@ class TrajectorySegment(BaseModel):
     """Response mask, 1 for LLM generated token, 0 for tool response token."""
     response_logprobs: Optional[list[float] | torch.Tensor] = None
     """Log probabilities for the response tokens."""
-    routed_experts: Optional[torch.Tensor] = None
+    routed_experts: Optional[np.ndarray | torch.Tensor] = None
     """Routed experts for the total tokens."""
     attention_mask: Optional[torch.Tensor] = None
     """Attention mask for the full sequence (prompt + response)."""
     position_ids: Optional[torch.Tensor] = None
     """Position ids for the full sequence (prompt + response)."""
+
+    @field_validator("routed_experts", mode="before")
+    @classmethod
+    def convert_routed_experts_to_tensor(cls, v):
+        """Convert numpy arrays to torch tensors for routed_experts."""
+        if v is None:
+            return None
+        if isinstance(v, np.ndarray):
+            return torch.from_numpy(v)
+        return v
+
 
 class AgentLoopOutput(BaseModel):
     """Agent loop output."""
