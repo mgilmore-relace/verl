@@ -18,9 +18,6 @@ import os
 from typing import Any, Optional
 from uuid import uuid4
 
-import torch
-from pandas.tests.arrays.masked.test_arrow_compat import pa
-
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
 from verl.utils.profiler import simple_timer

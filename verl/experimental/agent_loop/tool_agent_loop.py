@@ -374,8 +374,8 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)
-        if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
+        # Always update logprobs to maintain alignment with response_mask
+        agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         return AgentState.GENERATING
 
@@ -406,8 +406,8 @@ class ToolAgentLoop(AgentLoopBase):
         # Update prompt_ids and response_mask
         agent_data.prompt_ids += response_ids
         agent_data.response_mask += [0] * len(response_ids)
-        if agent_data.response_logprobs:
-            agent_data.response_logprobs += [0.0] * len(response_ids)
+        # Always update logprobs to maintain alignment with response_mask
+        agent_data.response_logprobs += [0.0] * len(response_ids)
 
         # double check prompt
         # Check termination condition
