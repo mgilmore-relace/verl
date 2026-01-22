@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
@@ -87,7 +88,7 @@ class AgentData:
 
         # Accumulated routed experts for MoE routing consistency across turns
         # Shape: (total_seq_len, num_layers, topk) - grows as conversation progresses
-        self.routed_experts: Optional[torch.Tensor] = None
+        self.routed_experts: Optional[np.ndarray | torch.Tensor] = None
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
