@@ -214,7 +214,7 @@ class TrajectorySegment(BaseModel):
 
 class TrajectorySegmentManager(BaseModel):
     segments: list[TrajectorySegment] = Field(default_factory=list)
-    response_start = 0
+    response_start: int = 0
 
     def add_segment(self, agent_data: "AgentLoopOutput"):
         # handle routed_experts copying based on its type
