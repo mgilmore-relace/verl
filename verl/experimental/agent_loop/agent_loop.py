@@ -25,6 +25,7 @@ import numpy as np
 import ray
 import torch
 from cachetools import LRUCache
+from numpy.core.tests.test_scalarinherit import B
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -212,8 +213,8 @@ class TrajectorySegment(BaseModel):
         return v
 
 
-class TrajectorySegmentManager:
-    segments: list[TrajectorySegment]
+class TrajectorySegmentManager(BaseModel):
+    segments: list[TrajectorySegment] = Field(default_factory=list)
 
     def __init__(self):
         self.response_start = 0
