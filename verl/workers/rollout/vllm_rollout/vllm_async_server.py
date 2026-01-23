@@ -331,6 +331,7 @@ class vLLMHttpServer:
             "quantization": quantization,
             "hf_overrides": hf_overrides,
             "scheduling_policy": self.config.scheduling_policy,
+            "no_async_scheduling": True,
             **engine_kwargs,
         }
 
