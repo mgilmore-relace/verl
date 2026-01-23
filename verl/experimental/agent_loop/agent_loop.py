@@ -257,9 +257,6 @@ class TrajectorySegmentManager(BaseModel):
     def __getitem__(self, idx: int) -> TrajectorySegment:
         return self.segments[idx]
 
-    def __iter__(self) -> Iterator[TrajectorySegment]:
-        return iter(self.segments)
-
     def __bool__(self) -> bool:
         return bool(self.segments)
 
@@ -675,7 +672,7 @@ class AgentLoopWorker:
 
     def _pad_segments(
         self,
-        segments: TrajectorySegmentManager,
+        segments_manager: TrajectorySegmentManager,
         prompt_length: int,
         response_length: int,
     ) -> list[_InternalAgentLoopOutput]:
@@ -695,7 +692,7 @@ class AgentLoopWorker:
         total_length = prompt_length + response_length
         padded_segments: list[_InternalAgentLoopOutput] = []
 
-        for segment in segments:
+        for segment in segments_manager.segments:
             # Pad prompt_ids (left padding)
             self.tokenizer.padding_side = "left"
             prompt_output = self.tokenizer.pad(
