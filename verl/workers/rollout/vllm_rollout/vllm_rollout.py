@@ -210,6 +210,13 @@ class vLLMAsyncRollout(BaseRollout):
             else int(ray.get_runtime_context().get_accelerator_ids()[device_name][0])
         )
         self.vllm_config = all_kwargs[0]["vllm_config"]
+
+        # vLLM 0.14.0+ validates local_world_size <= visible_device_count in init_device,
+        # but skips this check when distributed_executor_backend is "ray" or "external_launcher".
+        # Since verl launches workers externally via Ray (each with 1 GPU visible), we set
+        # "external_launcher" to bypass this validation.
+        if hasattr(self.vllm_config, "parallel_config"):
+            self.vllm_config.parallel_config.distributed_executor_backend = "external_launcher"
         if self.lora_config:
             lora_dtype = getattr(torch, self.config.dtype)
             self.vllm_config.lora_config = LoRAConfig(lora_dtype=lora_dtype, **self.lora_config)
