@@ -51,34 +51,34 @@ from verl.utils.rollout_skip import RolloutSkip
 
 
 def expand_batch_with_segments(batch: DataProto) -> DataProto:
-    """Expand batch with trajectory segments for per-segment optimization.
+    """Expand batch with padded trajectory segments for per-segment optimization.
 
     For samples that have multiple segments (due to policy changes mid-generation),
     this function expands the batch so each segment becomes its own sequence for
     optimization. The advantages are shared across all segments of the same trajectory.
 
     Args:
-        batch: The batch with computed advantages and optional trajectory_segments
+        batch: The batch with computed advantages and optional padded_segments
 
     Returns:
         Expanded batch where each segment is a separate sequence, or original batch
         if no segments present
     """
-    trajectory_segments = batch.non_tensor_batch.get("trajectory_segments", None)
-    if trajectory_segments is None:
+    padded_segments = batch.non_tensor_batch.get("padded_segments", None)
+    if padded_segments is None:
         return batch
 
     # Check if any samples have segments
-    has_segments = any(segs is not None and len(segs) > 0 for segs in trajectory_segments)
+    has_segments = any(segs is not None and len(segs) > 0 for segs in padded_segments)
     if not has_segments:
         return batch
 
     # Build expanded batch
     expanded_batch_tensors = {key: [] for key in batch.batch.keys()}
-    expanded_non_tensor = {key: [] for key in batch.non_tensor_batch.keys() if key != "trajectory_segments"}
+    expanded_non_tensor = {key: [] for key in batch.non_tensor_batch.keys() if key != "padded_segments"}
 
     for i in range(len(batch)):
-        segments = trajectory_segments[i]
+        segments = padded_segments[i]
         if segments is None or len(segments) == 0:
             # No segments - use original data
             for key in expanded_batch_tensors:
@@ -87,6 +87,7 @@ def expand_batch_with_segments(batch: DataProto) -> DataProto:
                 expanded_non_tensor[key].append(batch.non_tensor_batch[key][i])
         else:
             # Has segments - expand each segment as a separate sequence
+            # Segments are _InternalAgentLoopOutput objects with pre-computed tensors
             # Get shared values from final trajectory (advantages, returns, etc.)
             shared_advantages = batch.batch.get("advantages", None)
             shared_returns = batch.batch.get("returns", None)
@@ -97,10 +98,9 @@ def expand_batch_with_segments(batch: DataProto) -> DataProto:
                 expanded_batch_tensors["responses"].append(segment.response_ids)
                 expanded_batch_tensors["response_mask"].append(segment.response_mask)
 
-                # Concatenate prompt + response for input_ids
+                # Use segment's pre-computed input_ids (prompt + response already concatenated)
                 if "input_ids" in expanded_batch_tensors:
-                    input_ids = torch.cat([segment.prompt_ids, segment.response_ids], dim=0)
-                    expanded_batch_tensors["input_ids"].append(input_ids)
+                    expanded_batch_tensors["input_ids"].append(segment.input_ids)
 
                 # Use segment's attention_mask (computed during padding)
                 if "attention_mask" in expanded_batch_tensors and segment.attention_mask is not None:

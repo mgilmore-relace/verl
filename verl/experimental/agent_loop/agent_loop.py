@@ -337,8 +337,9 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
     """Multi-modal inputs for processors (e.g., pixel_values, image_grid_thw)."""
-    extra_fields: dict[str, Any] = {}
+    extra_fields: dict[str, Any] = Field(default_factory=dict)
     """Extra fields for dynamic addition."""
+    padded_segments: list["_InternalAgentLoopOutput"] = Field(default_factory=list)
 
 
 class DictConfigWrap:
@@ -677,22 +678,25 @@ class AgentLoopWorker:
 
     def _pad_segments(
         self,
-        segments: list[TrajectorySegment],
+        segments: TrajectorySegmentManager,
         prompt_length: int,
         response_length: int,
-    ) -> list[TrajectorySegment]:
+    ) -> list[_InternalAgentLoopOutput]:
         """Pad segments to fixed lengths for optimization.
 
+        This method mirrors the padding logic in _agent_loop_postprocess to ensure
+        consistent tensor shapes and masking behavior.
+
         Args:
-            segments: List of TrajectorySegment with variable-length data
+            segments: TrajectorySegmentManager with variable-length TrajectorySegment data
             prompt_length: Target prompt length (left padded)
             response_length: Target response length (right padded)
 
         Returns:
-            List of TrajectorySegment with padded tensors
+            List of _InternalAgentLoopOutput with padded tensor fields
         """
         total_length = prompt_length + response_length
-        padded_segments = []
+        padded_segments: list[_InternalAgentLoopOutput] = []
 
         for segment in segments:
             # Pad prompt_ids (left padding)
@@ -702,9 +706,10 @@ class AgentLoopWorker:
                 padding="max_length",
                 max_length=prompt_length,
                 return_tensors="pt",
-                return_attention_mask=False,
+                return_attention_mask=True,
             )
             padded_prompt_ids = prompt_output["input_ids"].squeeze(0)
+            prompt_attention_mask = prompt_output["attention_mask"].squeeze(0)
 
             # Pad response_ids (right padding)
             self.tokenizer.padding_side = "right"
@@ -713,11 +718,12 @@ class AgentLoopWorker:
                 padding="max_length",
                 max_length=response_length,
                 return_tensors="pt",
-                return_attention_mask=False,
+                return_attention_mask=True,
             )
             padded_response_ids = response_output["input_ids"].squeeze(0)
+            response_attention_mask = response_output["attention_mask"].squeeze(0)
 
-            # Pad response_mask (right padding with 0s)
+            # Pad response_mask (right padding, then multiply by attention_mask to zero out padding)
             response_mask_output = self.tokenizer.pad(
                 {"input_ids": segment.response_mask},
                 padding="max_length",
@@ -725,15 +731,17 @@ class AgentLoopWorker:
                 return_tensors="pt",
                 return_attention_mask=False,
             )
-            padded_response_mask = response_mask_output["input_ids"].squeeze(0)
+            padded_response_mask = response_mask_output["input_ids"].squeeze(0) * response_attention_mask
 
-            # Pad response_logprobs (right padding with 0.0, truncate if too long)
+            # Pad response_logprobs (right padding with 0.0)
             padded_logprobs = None
             if segment.response_logprobs is not None:
-                # Truncate if longer than response_length, then pad
-                logprobs = list(segment.response_logprobs)[:response_length]
-                pad_size = response_length - len(logprobs)
-                padded_logprobs = torch.tensor(logprobs + [0.0] * pad_size)
+                pad_size = response_length - len(segment.response_logprobs)
+                padded_logprobs = torch.tensor(list(segment.response_logprobs) + [0.0] * pad_size)
+
+            # Compute attention_mask and input_ids
+            attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=0)
+            input_ids = torch.cat([padded_prompt_ids, padded_response_ids], dim=0)
 
             # Pad routed_experts to total_length
             padded_routed_experts = None
@@ -741,20 +749,25 @@ class AgentLoopWorker:
                 experts = segment.routed_experts
                 if isinstance(experts, np.ndarray):
                     experts = torch.from_numpy(experts)
+                elif isinstance(experts, torch.Tensor):
+                    experts = experts
+                else:
+                    raise TypeError(f"Unsupported type for routed_experts: {type(segment.routed_experts)}")
 
                 length, layer_num, topk_num = experts.shape
                 padded_routed_experts = torch.zeros(total_length, layer_num, topk_num, dtype=experts.dtype)
 
-                # Calculate start position accounting for left padding of prompt
+                # Calculate start position: left padding means original prompt starts at the end
                 start_pos = prompt_length - len(segment.prompt_ids)
                 end_pos = min(start_pos + length, total_length)
-                padded_routed_experts[start_pos:end_pos] = experts[: end_pos - start_pos]
 
-            # Compute attention_mask: 0 for padding, 1 for actual tokens
-            pad_token_id = self.tokenizer.pad_token_id
-            prompt_attention_mask = (padded_prompt_ids != pad_token_id).long()
-            response_attention_mask = (padded_response_ids != pad_token_id).long()
-            attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=0)
+                # Add boundary checks for robustness
+                if start_pos < 0 or end_pos > total_length:
+                    raise ValueError(
+                        f"Invalid position range: start_pos={start_pos}, end_pos={end_pos}, total_length={total_length}"
+                    )
+
+                padded_routed_experts[start_pos:end_pos] = experts[: end_pos - start_pos]
 
             # Compute position_ids: sequential positions for non-padding tokens
             position_ids = torch.zeros_like(attention_mask)
@@ -762,14 +775,16 @@ class AgentLoopWorker:
             position_ids[valid_mask] = torch.arange(valid_mask.sum().item())
 
             padded_segments.append(
-                TrajectorySegment(
+                _InternalAgentLoopOutput(
                     prompt_ids=padded_prompt_ids,
                     response_ids=padded_response_ids,
+                    input_ids=input_ids,
                     response_mask=padded_response_mask,
-                    response_logprobs=padded_logprobs,
-                    routed_experts=padded_routed_experts,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
+                    response_logprobs=padded_logprobs,
+                    routed_experts=padded_routed_experts,
+                    metrics=AgentLoopMetrics(),
                 )
             )
 
@@ -903,7 +918,7 @@ class AgentLoopWorker:
             num_turns=output.num_turns,
             metrics=output.metrics,
             extra_fields=output.extra_fields,
-            segments=padded_segments,
+            padded_segments=padded_segments if padded_segments else [],
         )
 
     def _compute_multi_modal_inputs(self, output, input_ids) -> dict[str, torch.Tensor]:
@@ -1059,10 +1074,10 @@ class AgentLoopWorker:
 
         non_tensor_batch.update(extra_fields)
 
-        # Add trajectory segments for MoE per-segment expert selection
-        segments_list = [input.segments for input in inputs]
-        if any(s is not None for s in segments_list):
-            non_tensor_batch["trajectory_segments"] = np.array(segments_list, dtype=object)
+        # Add padded trajectory segments for MoE per-segment expert selection
+        padded_segments_list = [input.padded_segments for input in inputs]
+        if any(s is not None and len(s) > 0 for s in padded_segments_list):
+            non_tensor_batch["padded_segments"] = np.array(padded_segments_list, dtype=object)
 
         return DataProto(
             batch=batch,
