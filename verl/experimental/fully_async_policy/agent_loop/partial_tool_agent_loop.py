@@ -172,7 +172,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 prompt_ids=agent_data.prompt_ids,
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
-                expert_selection=agent_data.routed_experts,
+                # expert_selection=agent_data.routed_experts,
             )
 
         agent_data.response_ids = output.token_ids

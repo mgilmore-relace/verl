@@ -238,7 +238,7 @@ class ToolAgentLoop(AgentLoopBase):
                 sampling_params=sampling_params,
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
-                expert_selection=agent_data.routed_experts,
+                # expert_selection=agent_data.routed_experts,
             )
 
         agent_data.assistant_turns += 1

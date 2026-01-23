@@ -475,7 +475,7 @@ class vLLMHttpServer:
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-        expert_selection: Optional[Any] = None,
+        # expert_selection: Optional[Any] = None,
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
@@ -534,7 +534,7 @@ class vLLMHttpServer:
             prompt = TokensPrompt(
                 prompt_token_ids=prompt_ids,
                 multi_modal_data=multi_modal_data,
-                expert_selection=expert_selection,
+                # expert_selection=expert_selection,
             )
 
             # Add lora request
