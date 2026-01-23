@@ -105,7 +105,7 @@ class AsyncLLMServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
-        expert_selection: Optional[torch.Tensor] = None,
+        # expert_selection: Optional[torch.Tensor] = None,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -134,7 +134,7 @@ class AsyncLLMServerManager:
                     sampling_params=sampling_params,
                     image_data=image_data,
                     video_data=video_data,
-                    expert_selection=expert_selection,
+                    # expert_selection=expert_selection,
                 ).future()
             )
 
