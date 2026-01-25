@@ -147,7 +147,13 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         keys_not_found = []
         weights_loaded = 0
 
+        from ray.util.collective import collective
+
         for idx, (key, shape, dtype) in enumerate(self._weights_info):
+            # Synchronize torch.distributed before Ray collective to ensure any prior collectives are complete
+            if self._is_actor:
+                torch.distributed.barrier()
+
             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor:
                 assert key in params
@@ -160,7 +166,8 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                     if idx < 3:
                         print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
 
-            from ray.util.collective import collective
+            # Synchronize GPU operations before the Ray collective broadcast
+            get_torch_device().synchronize()
 
             collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
 
