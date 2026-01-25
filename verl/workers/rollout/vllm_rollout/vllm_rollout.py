@@ -268,6 +268,8 @@ class vLLMAsyncRollout(BaseRollout):
             weights: A generator that yields the name of the weight tensor and the tensor itself.
         """
         peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
+        print(f"[DEBUG vLLMAsyncRollout.update_weights] peft_config={peft_config is not None}, base_sync_done={base_sync_done}")
+
         if peft_config and base_sync_done:
             # In async mode, make sure the old lora is removed before adding the new one
             self.inference_engine.worker.remove_lora(VLLM_LORA_INT_ID)
@@ -286,6 +288,18 @@ class vLLMAsyncRollout(BaseRollout):
 
             model_runner = self.inference_engine.worker.model_runner
             model = model_runner.model
+
+            print(f"[DEBUG vLLMAsyncRollout.update_weights] model type: {type(model)}")
+            print(f"[DEBUG vLLMAsyncRollout.update_weights] model_runner type: {type(model_runner)}")
+
+            # Debug: check a sample parameter before update
+            sample_param_name = None
+            for name, param in model.named_parameters():
+                if "embed" in name.lower() or "layer" in name.lower():
+                    sample_param_name = name
+                    print(f"[DEBUG vLLMAsyncRollout.update_weights] BEFORE - {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+                    break
+
             patch_vllm_moe_model_weight_loader(model)
 
             # Add the FP8 related logic here as sharding manager has been deprecated.
@@ -297,7 +311,20 @@ class vLLMAsyncRollout(BaseRollout):
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8, async)")
-                model.load_weights(weights)
+                # Convert generator to list to count and inspect
+                weights_list = list(weights)
+                print(f"[DEBUG vLLMAsyncRollout.update_weights] Loading {len(weights_list)} weights")
+                if weights_list:
+                    first_name, first_tensor = weights_list[0]
+                    print(f"[DEBUG vLLMAsyncRollout.update_weights] First weight: {first_name}, shape={first_tensor.shape}, mean={first_tensor.mean().item():.6f}")
+                model.load_weights(weights_list)
+
+            # Debug: check sample parameter after update
+            if sample_param_name:
+                for name, param in model.named_parameters():
+                    if name == sample_param_name:
+                        print(f"[DEBUG vLLMAsyncRollout.update_weights] AFTER - {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+                        break
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Batch generate sequences in sync mode.

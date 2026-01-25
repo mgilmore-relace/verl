@@ -423,6 +423,11 @@ class CheckpointEngine:
             overlap_broadcast_and_consume (bool): Whether to use the pipeline approach
             for broadcasting and loading weights.
         """
+        print(f"[DEBUG update_checkpoint] current_rank={self.current_rank}, inference_model is None: {inference_model is None}")
+        print(f"[DEBUG update_checkpoint] overlap_broadcast_and_consume={overlap_broadcast_and_consume}")
+        print(f"[DEBUG update_checkpoint] global_buckets keys: {list(self.global_buckets.keys())}")
+        total_weights_to_load = sum(len(b.metas) for buckets in self.global_buckets.values() for b in buckets)
+        print(f"[DEBUG update_checkpoint] total weights to broadcast: {total_weights_to_load}")
         try:
             h2d_buffer: torch.Tensor | None = (
                 None
@@ -506,7 +511,12 @@ class CheckpointEngine:
                     socket.send_pyobj(_to_flattened_tensor_meta(bucket.metas, start))
                 elif inference_model is not None:
                     named_tensor = _to_flattened_tensor_meta(bucket.metas, 0)
-                    inference_model.load_weights(_extract_weights(named_tensor, buffer_b))
+                    weights_to_load = list(_extract_weights(named_tensor, buffer_b))
+                    # Debug: print info about first few weights
+                    if gidx < 2:
+                        for wname, wtensor in weights_to_load[:2]:
+                            print(f"[DEBUG update_checkpoint] Loading weight {wname}: shape={wtensor.shape}, mean={wtensor.float().mean().item():.6f}")
+                    inference_model.load_weights(weights_to_load)
 
                 gidx += 1
 
@@ -518,5 +528,6 @@ class CheckpointEngine:
             socket.close()
 
         collective.barrier(group_name=group_name)
+        print(f"[DEBUG update_checkpoint] Completed. Total broadcast iterations: {gidx}")
         # clear host memory cache
         self.memory_buffers = []
