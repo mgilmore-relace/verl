@@ -156,10 +156,6 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                 assert shape == weight.size()
                 assert dtype == weight.dtype
 
-            # Synchronize torch.distributed before Ray collective to ensure all_gather is complete on all actors
-            if self._is_actor:
-                torch.distributed.barrier()
-
             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor and torch.distributed.get_rank() == 0:
                 tensor.copy_(weight)
@@ -170,6 +166,7 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
             # Synchronize GPU operations before the Ray collective broadcast
             get_torch_device().synchronize()
 
+            collective.barrier(group_name=sync_group_name)
             collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
 
             if self._is_rollout:
