@@ -181,12 +181,9 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                     if len(keys_not_found) <= 5:
                         print(f"[DEBUG sync_rollout_weights] WARNING: Key '{key}' not found in model parameters!")
 
-                # Debug: print stats for first few weights being loaded
-                if idx < 3:
-                    print(f"[DEBUG sync_rollout_weights] Loading weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
-
                 # Check for NaN/Inf in weights
                 if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                    print(f"[DEBUG sync_rollout_weights] Loading weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
                     print(f"[DEBUG sync_rollout_weights] ERROR: Weight {key} contains NaN or Inf!")
 
                 inference_model.load_weights([(key, tensor)])
