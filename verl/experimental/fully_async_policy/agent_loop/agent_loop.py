@@ -188,6 +188,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorker):
                     # Apply masking for tokens covered by previous segments
                     output.save_segment(current_param_version)  # Save current segment
 
+                kwargs.pop("output", None)
                 output = await self._agent_loop_postprocess(output, **kwargs)
 
                 return output
