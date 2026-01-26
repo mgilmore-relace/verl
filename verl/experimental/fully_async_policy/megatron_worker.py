@@ -13,7 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import logging
 import os
 import time
@@ -32,6 +31,7 @@ from verl.utils.device import (
     get_torch_device,
 )
 from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu, per_tensor_generator
+from verl.utils.tensordict_utils import get
 from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
 from .checkpoint_engine import CheckpointEngine
@@ -113,8 +113,8 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         assert hasattr(self, "_weights_info") and self._weights_info is not None
 
         local_rank = torch.distributed.get_rank()
-        print(f"[DEBUG sync_rollout_weights] rank={local_rank}, is_actor={self._is_actor}, is_rollout={self._is_rollout}")
-        print(f"[DEBUG sync_rollout_weights] weights_info count: {len(self._weights_info)}")
+        # print(f"[DEBUG sync_rollout_weights] rank={local_rank}, is_actor={self._is_actor}, is_rollout={self._is_rollout}")
+        # print(f"[DEBUG sync_rollout_weights] weights_info count: {len(self._weights_info)}")
 
         if self._is_actor and self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
@@ -128,7 +128,7 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         if self._is_rollout:
             inference_model = get_inference_model(self.rollout, debug=True)
             model_param_names = set(name for name, _ in inference_model.named_parameters())
-            print(f"[DEBUG sync_rollout_weights] model has {len(model_param_names)} parameters")
+            # print(f"[DEBUG sync_rollout_weights] model has {len(model_param_names)} parameters")
 
             from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
@@ -139,7 +139,7 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                 if "embed" in name.lower() or "layer" in name.lower():
                     sample_param_name = name
                     sample_param_before = (param.mean().item(), param.std().item(), param.abs().max().item())
-                    print(f"[DEBUG sync_rollout_weights] BEFORE sync - {name}: mean={sample_param_before[0]:.6f}, std={sample_param_before[1]:.6f}, max={sample_param_before[2]:.6f}")
+                    # print(f"[DEBUG sync_rollout_weights] BEFORE sync - {name}: mean={sample_param_before[0]:.6f}, std={sample_param_before[1]:.6f}, max={sample_param_before[2]:.6f}")
                     break
 
         # Track key matching statistics
@@ -160,10 +160,10 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
             if self._is_actor and torch.distributed.get_rank() == 0:
                 tensor.copy_(weight)
                 origin_tensor = tensor.clone()
-                print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
+                # print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
 
                 ray_rank = collective.get_rank(group_name=sync_group_name)
-                print(f"[DEBUG sync_rollout_weights] Ray collective rank in group '{sync_group_name}': {ray_rank}")
+                # print(f"[DEBUG sync_rollout_weights] Ray collective rank in group '{sync_group_name}': {ray_rank}")
 
             # Synchronize GPU operations before the Ray collective broadcast
             get_torch_device().synchronize()
@@ -175,10 +175,10 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
             # Ensure all GPU operations are complete after broadcast
             get_torch_device().synchronize()
 
-            if self._is_actor and torch.distributed.get_rank() == 0:
-                # Verify that the broadcasted tensor matches the original
-                if not torch.allclose(tensor, origin_tensor):
-                    print(f"[DEBUG sync_rollout_weights] ERROR: Broadcasted tensor for key {key} does not match original!")
+            # if self._is_actor and torch.distributed.get_rank() == 0:
+            #     # Verify that the broadcasted tensor matches the original
+            #     if not torch.allclose(tensor, origin_tensor):
+                    # print(f"[DEBUG sync_rollout_weights] ERROR: Broadcasted tensor for key {key} does not match original!")
 
             if self._is_rollout:
                 # Check if key exists in model
@@ -186,35 +186,35 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                     keys_matched += 1
                 else:
                     keys_not_found.append(key)
-                    if len(keys_not_found) <= 5:
-                        print(f"[DEBUG sync_rollout_weights] WARNING: Key '{key}' not found in model parameters!")
+                    # if len(keys_not_found) <= 5:
+                        # print(f"[DEBUG sync_rollout_weights] WARNING: Key '{key}' not found in model parameters!")
 
                 # Check for NaN/Inf in weights
-                if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-                    print(f"[DEBUG sync_rollout_weights] Loading weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
-                    print(f"[DEBUG sync_rollout_weights] ERROR: Weight {key} contains NaN or Inf!")
+                # if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                    # print(f"[DEBUG sync_rollout_weights] Loading weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
+                    # print(f"[DEBUG sync_rollout_weights] ERROR: Weight {key} contains NaN or Inf!")
 
                 inference_model.load_weights([(key, tensor)])
                 weights_loaded += 1
 
         if self._is_rollout:
-            print(f"[DEBUG sync_rollout_weights] Weight sync summary:")
-            print(f"[DEBUG sync_rollout_weights]   Total weights in info: {len(self._weights_info)}")
-            print(f"[DEBUG sync_rollout_weights]   Weights loaded: {weights_loaded}")
-            print(f"[DEBUG sync_rollout_weights]   Keys matched in model: {keys_matched}")
-            print(f"[DEBUG sync_rollout_weights]   Keys not found: {len(keys_not_found)}")
-            if keys_not_found:
-                print(f"[DEBUG sync_rollout_weights]   First 10 missing keys: {keys_not_found[:10]}")
+            # print(f"[DEBUG sync_rollout_weights] Weight sync summary:")
+            # print(f"[DEBUG sync_rollout_weights]   Total weights in info: {len(self._weights_info)}")
+            # print(f"[DEBUG sync_rollout_weights]   Weights loaded: {weights_loaded}")
+            # print(f"[DEBUG sync_rollout_weights]   Keys matched in model: {keys_matched}")
+            # print(f"[DEBUG sync_rollout_weights]   Keys not found: {len(keys_not_found)}")
+            # if keys_not_found:
+            #     print(f"[DEBUG sync_rollout_weights]   First 10 missing keys: {keys_not_found[:10]}")
 
             # Check sample parameter after sync
             if sample_param_name:
                 for name, param in inference_model.named_parameters():
                     if name == sample_param_name:
                         after_stats = (param.mean().item(), param.std().item(), param.abs().max().item())
-                        print(f"[DEBUG sync_rollout_weights] AFTER sync - {name}: mean={after_stats[0]:.6f}, std={after_stats[1]:.6f}, max={after_stats[2]:.6f}")
+                        # print(f"[DEBUG sync_rollout_weights] AFTER sync - {name}: mean={after_stats[0]:.6f}, std={after_stats[1]:.6f}, max={after_stats[2]:.6f}")
                         if sample_param_before:
                             changed = abs(after_stats[0] - sample_param_before[0]) > 1e-6 or abs(after_stats[1] - sample_param_before[1]) > 1e-6
-                            print(f"[DEBUG sync_rollout_weights] Parameter changed after sync: {changed}")
+                            # print(f"[DEBUG sync_rollout_weights] Parameter changed after sync: {changed}")
                         break
 
         if self._is_actor and self._is_offload_param:
