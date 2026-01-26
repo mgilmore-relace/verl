@@ -170,6 +170,10 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
 
             collective.barrier(group_name=sync_group_name)
             collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+            collective.barrier(group_name=sync_group_name)
+
+            # Ensure all GPU operations are complete after broadcast
+            get_torch_device().synchronize()
 
             if self._is_actor and torch.distributed.get_rank() == 0:
                 # Verify that the broadcasted tensor matches the original
