@@ -159,15 +159,18 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor and torch.distributed.get_rank() == 0:
                 tensor.copy_(weight)
-                # Debug: print stats for first few weights
-                if idx < 3:
-                    print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
+                origin_tensor = tensor.clone()
+                print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
 
             # Synchronize GPU operations before the Ray collective broadcast
             get_torch_device().synchronize()
 
-            collective.barrier(group_name=sync_group_name)
             collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+
+            if self._is_actor and torch.distributed.get_rank() == 0:
+                # Verify that the broadcasted tensor matches the original
+                if not torch.allclose(tensor, origin_tensor):
+                    print(f"[DEBUG sync_rollout_weights] ERROR: Broadcasted tensor for key {key} does not match original!")
 
             if self._is_rollout:
                 # Check if key exists in model
