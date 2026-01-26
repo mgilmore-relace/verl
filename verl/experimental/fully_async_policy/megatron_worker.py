@@ -162,9 +162,13 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                 origin_tensor = tensor.clone()
                 print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
 
+                ray_rank = collective.get_rank(group_name=sync_group_name)
+                print(f"[DEBUG sync_rollout_weights] Ray collective rank in group '{sync_group_name}': {ray_rank}")
+
             # Synchronize GPU operations before the Ray collective broadcast
             get_torch_device().synchronize()
 
+            collective.barrier(group_name=sync_group_name)
             collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
 
             if self._is_actor and torch.distributed.get_rank() == 0:
