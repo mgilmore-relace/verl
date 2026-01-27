@@ -19,7 +19,9 @@ import time
 
 import torch
 import torch.distributed
+from numpy import mod
 from omegaconf import DictConfig
+from pandas.core.algorithms import mode
 
 from verl.experimental.fully_async_policy.megatron_utils import (
     copy_megatron_model_to_cpu,
@@ -32,6 +34,7 @@ from verl.utils.device import (
 )
 from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu, per_tensor_generator
 from verl.utils.tensordict_utils import get
+from verl.utils.vllm.vllm_fp8_utils import is_fp8_model, load_quanted_weights
 from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
 from .checkpoint_engine import CheckpointEngine
@@ -44,7 +47,7 @@ device_name = get_device_name()
 __all__ = ["DetachActorWorker", "DetachAsyncRolloutWorker", "CriticWorker"]
 
 
-def get_inference_model(rollout, debug=True):
+def get_inference_model_and_runner(rollout):
     """
     get models according to different types of inference_engine
     Args:
@@ -52,45 +55,23 @@ def get_inference_model(rollout, debug=True):
         debug: whether to print debug information
     Returns:
         model: model object
+        runner: runner object
     """
     inference_engine = rollout.inference_engine
 
-    if debug:
-        print(f"[DEBUG get_inference_model] inference_engine type: {type(inference_engine)}")
-        print(f"[DEBUG get_inference_model] has llm_engine: {hasattr(inference_engine, 'llm_engine')}")
-        print(f"[DEBUG get_inference_model] has worker: {hasattr(inference_engine, 'worker')}")
-
     if hasattr(inference_engine, "llm_engine"):
-        if debug:
-            print("[DEBUG get_inference_model] Using llm_engine path")
-        inference_model = inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        model_runner = inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner
+        inference_model = model_runner.model
     elif hasattr(inference_engine, "worker"):
-        if debug:
-            worker = inference_engine.worker
-            print(f"[DEBUG get_inference_model] Using worker path")
-            print(f"[DEBUG get_inference_model] worker type: {type(worker)}")
-            print(f"[DEBUG get_inference_model] has model_runner: {hasattr(worker, 'model_runner')}")
-            if hasattr(worker, "model_runner"):
-                model_runner = worker.model_runner
-                print(f"[DEBUG get_inference_model] model_runner type: {type(model_runner)}")
-                print(f"[DEBUG get_inference_model] has model: {hasattr(model_runner, 'model')}")
-        inference_model = inference_engine.worker.model_runner.model
+        model_runner = inference_engine.worker.model_runner
+        inference_model = model_runner.model
     else:
         raise AttributeError(
             f"Unsupported inference_engine type: {type(inference_engine)}. "
             f"Expected LLM (with llm_engine attribute) or WorkerWrapperBase (with worker attribute)."
         )
 
-    if debug:
-        print(f"[DEBUG get_inference_model] inference_model type: {type(inference_model)}")
-        print(f"[DEBUG get_inference_model] model param count: {sum(p.numel() for p in inference_model.parameters())}")
-        # Print a sample of parameter names
-        param_names = [name for name, _ in inference_model.named_parameters()]
-        print(f"[DEBUG get_inference_model] first 5 param names: {param_names[:5]}")
-        print(f"[DEBUG get_inference_model] last 5 param names: {param_names[-5:]}")
-
-    return inference_model
-
+    return inference_model, model_runner
 
 class DetachNcclSync(AsyncActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
@@ -104,118 +85,99 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
             current_rank, actor_ranks, rollout_ranks, self.config.checkpoint_engine.device_buffer_size_M
         )
 
-    def _get_actor_params(self):
-        pass
+    @staticmethod
+    def _get_layer_id(key: str) -> str:
+        """Extract layer identifier from weight key for grouping."""
+        parts = key.split(".")
+        # model.layers.X.* -> model.layers.X
+        if "layers" in parts:
+            idx = parts.index("layers")
+            if idx + 1 < len(parts):
+                return ".".join(parts[: idx + 2])
+        # embed_tokens, lm_head, norm, etc.
+        for special in ["embed_tokens", "lm_head", "norm", "final_layernorm"]:
+            if special in key:
+                return special
+        return parts[0] if parts else key
+
+    def parameter_generator(self, sync_group_name: str = "actor_rollout"):
+        """Generate weight chunks grouped by layer for atomic loading.
+
+        Yields lists of (key, tensor) pairs where weights belonging to the
+        same transformer layer are grouped together.
+        """
+        from ray.util.collective import collective
+
+        params_generator = self._get_actor_params_generator() if self._is_actor else None
+
+        current_layer = None
+        chunk = []
+
+        for key, shape, dtype in self._weights_info:
+            if self._is_actor:
+                weight_key, weight = next(params_generator)
+                assert key == weight_key and shape == weight.size() and dtype == weight.dtype
+
+            layer_id = self._get_layer_id(key)
+
+            # Yield previous chunk when layer changes
+            if layer_id != current_layer and chunk:
+                yield chunk
+                chunk = []
+            current_layer = layer_id
+
+            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+            if self._is_actor and torch.distributed.get_rank() == 0:
+                tensor.copy_(weight)
+
+            get_torch_device().synchronize()
+            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+            get_torch_device().synchronize()
+
+            chunk.append((key, tensor))
+
+        if chunk:
+            yield chunk
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self, sync_group_name="actor_rollout"):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
         assert hasattr(self, "_weights_info") and self._weights_info is not None
 
-        local_rank = torch.distributed.get_rank()
-        # print(f"[DEBUG sync_rollout_weights] rank={local_rank}, is_actor={self._is_actor}, is_rollout={self._is_rollout}")
-        # print(f"[DEBUG sync_rollout_weights] weights_info count: {len(self._weights_info)}")
-
         if self._is_actor and self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-        params_generator = self._get_actor_params_generator() if self._is_actor else None
 
         inference_model = None
-        model_param_names = set()
-        sample_param_name = None
-        sample_param_before = None
+        model_runner = None
 
         if self._is_rollout:
-            inference_model = get_inference_model(self.rollout, debug=True)
-            model_param_names = set(name for name, _ in inference_model.named_parameters())
-            # print(f"[DEBUG sync_rollout_weights] model has {len(model_param_names)} parameters")
-
             from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+
+            inference_model, model_runner = get_inference_model_and_runner(self.rollout)
 
             patch_vllm_moe_model_weight_loader(inference_model)
 
-            # Sample a parameter before weight sync for comparison
-            for name, param in inference_model.named_parameters():
-                if "embed" in name.lower() or "layer" in name.lower():
-                    sample_param_name = name
-                    sample_param_before = (param.mean().item(), param.std().item(), param.abs().max().item())
-                    # print(f"[DEBUG sync_rollout_weights] BEFORE sync - {name}: mean={sample_param_before[0]:.6f}, std={sample_param_before[1]:.6f}, max={sample_param_before[2]:.6f}")
-                    break
-
-        # Track key matching statistics
-        keys_matched = 0
-        keys_not_found = []
-        weights_loaded = 0
-
-        from ray.util.collective import collective
-
-        for idx, (key, shape, dtype) in enumerate(self._weights_info):
-            if self._is_actor:
-                weight_key, weight = next(params_generator)
-                assert key == weight_key
-                assert shape == weight.size()
-                assert dtype == weight.dtype
-
-            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-            if self._is_actor and torch.distributed.get_rank() == 0:
-                tensor.copy_(weight)
-                origin_tensor = tensor.clone()
-                # print(f"[DEBUG sync_rollout_weights] Actor weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
-
-                ray_rank = collective.get_rank(group_name=sync_group_name)
-                # print(f"[DEBUG sync_rollout_weights] Ray collective rank in group '{sync_group_name}': {ray_rank}")
-
-            # Synchronize GPU operations before the Ray collective broadcast
-            get_torch_device().synchronize()
-
-            collective.barrier(group_name=sync_group_name)
-            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
-            collective.barrier(group_name=sync_group_name)
-
-            # Ensure all GPU operations are complete after broadcast
-            get_torch_device().synchronize()
-
-            # if self._is_actor and torch.distributed.get_rank() == 0:
-            #     # Verify that the broadcasted tensor matches the original
-            #     if not torch.allclose(tensor, origin_tensor):
-                    # print(f"[DEBUG sync_rollout_weights] ERROR: Broadcasted tensor for key {key} does not match original!")
-
-            if self._is_rollout:
-                # Check if key exists in model
-                if key in model_param_names:
-                    keys_matched += 1
-                else:
-                    keys_not_found.append(key)
-                    # if len(keys_not_found) <= 5:
-                        # print(f"[DEBUG sync_rollout_weights] WARNING: Key '{key}' not found in model parameters!")
-
-                # Check for NaN/Inf in weights
-                # if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-                    # print(f"[DEBUG sync_rollout_weights] Loading weight {key}: shape={shape}, mean={tensor.mean().item():.6f}, std={tensor.std().item():.6f}")
-                    # print(f"[DEBUG sync_rollout_weights] ERROR: Weight {key} contains NaN or Inf!")
-
-                inference_model.load_weights([(key, tensor)])
-                weights_loaded += 1
+        # Generator yields chunks of (key, tensor) pairs grouped by layer
+        weight_chunks = self.parameter_generator(sync_group_name)
 
         if self._is_rollout:
-            # print(f"[DEBUG sync_rollout_weights] Weight sync summary:")
-            # print(f"[DEBUG sync_rollout_weights]   Total weights in info: {len(self._weights_info)}")
-            # print(f"[DEBUG sync_rollout_weights]   Weights loaded: {weights_loaded}")
-            # print(f"[DEBUG sync_rollout_weights]   Keys matched in model: {keys_matched}")
-            # print(f"[DEBUG sync_rollout_weights]   Keys not found: {len(keys_not_found)}")
-            # if keys_not_found:
-            #     print(f"[DEBUG sync_rollout_weights]   First 10 missing keys: {keys_not_found[:10]}")
-
-            # Check sample parameter after sync
-            if sample_param_name:
-                for name, param in inference_model.named_parameters():
-                    if name == sample_param_name:
-                        after_stats = (param.mean().item(), param.std().item(), param.abs().max().item())
-                        # print(f"[DEBUG sync_rollout_weights] AFTER sync - {name}: mean={after_stats[0]:.6f}, std={after_stats[1]:.6f}, max={after_stats[2]:.6f}")
-                        if sample_param_before:
-                            changed = abs(after_stats[0] - sample_param_before[0]) > 1e-6 or abs(after_stats[1] - sample_param_before[1]) > 1e-6
-                            # print(f"[DEBUG sync_rollout_weights] Parameter changed after sync: {changed}")
-                        break
+            if is_fp8_model(model_runner.vllm_config):
+                logger.info(f"FP8 model detected (async): {model_runner.vllm_config.quant_config}")
+                # Process each chunk atomically for FP8 quantization
+                total_loaded = 0
+                for chunk in weight_chunks:
+                    loaded_params = load_quanted_weights(chunk, model_runner)
+                    total_loaded += len(loaded_params)
+                logger.info(f"FP8 weights loaded (async), loaded_params: {total_loaded}")
+            else:
+                logger.info("Loading standard weights (non-FP8, async)")
+                # Load each chunk atomically
+                total_weights = 0
+                for chunk in weight_chunks:
+                    if chunk:
+                        inference_model.load_weights(chunk)
+                        total_weights += len(chunk)
+                logger.info(f"Loaded {total_weights} weights")
 
         if self._is_actor and self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
@@ -283,7 +245,7 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         sample_param_name = None
         sample_param_before = None
         if self._is_rollout:
-            inference_model = get_inference_model(self.rollout, debug=True)
+            inference_model = get_inference_model_and_runner(self.rollout)
             model_param_names = set(name for name, _ in inference_model.named_parameters())
             print(f"[DEBUG sync_rollout_weights_by_checkpoint] model has {len(model_param_names)} parameters")
 
