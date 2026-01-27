@@ -162,10 +162,11 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         weight_chunks = self.parameter_generator(sync_group_name)
 
 
-        if self._is_rollout and use_fp8:
+        if self._is_rollout:
             use_fp8 = is_fp8_model(model_runner.vllm_config)
             total_loaded = 0
-            logger.info("Start loading FP8 weights (async)...")
+            if use_fp8:
+                logger.info("Start loading FP8 weights (async)...")
 
         for chunk in weight_chunks:
             if self._is_rollout:
