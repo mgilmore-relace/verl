@@ -158,26 +158,29 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
             patch_vllm_moe_model_weight_loader(inference_model)
 
         # Generator yields chunks of (key, tensor) pairs grouped by layer
+        # Both actors and rollouts must iterate to participate in collective broadcast
         weight_chunks = self.parameter_generator(sync_group_name)
 
-        if self._is_rollout:
-            if is_fp8_model(model_runner.vllm_config):
-                logger.info(f"FP8 model detected (async): {model_runner.vllm_config.quant_config}")
-                # Process each chunk atomically for FP8 quantization
-                total_loaded = 0
-                for chunk in weight_chunks:
+
+        if self._is_rollout and use_fp8:
+            use_fp8 = is_fp8_model(model_runner.vllm_config)
+            total_loaded = 0
+            logger.info("Start loading FP8 weights (async)...")
+
+        for chunk in weight_chunks:
+            if self._is_rollout:
+                if use_fp8:
                     loaded_params = load_quanted_weights(chunk, model_runner)
                     total_loaded += len(loaded_params)
+                else:
+                    inference_model.load_weights(chunk)
+                    total_loaded += len(chunk)
+
+        if self._is_rollout:
+            if use_fp8:
                 logger.info(f"FP8 weights loaded (async), loaded_params: {total_loaded}")
             else:
-                logger.info("Loading standard weights (non-FP8, async)")
-                # Load each chunk atomically
-                total_weights = 0
-                for chunk in weight_chunks:
-                    if chunk:
-                        inference_model.load_weights(chunk)
-                        total_weights += len(chunk)
-                logger.info(f"Loaded {total_weights} weights")
+                logger.info(f"Loaded {total_loaded} weights")
 
         if self._is_actor and self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
