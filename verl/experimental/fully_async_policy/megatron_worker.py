@@ -246,10 +246,11 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         update_start_time = time.time()
 
         inference_model = None
+        model_runner = None
         sample_param_name = None
         sample_param_before = None
         if self._is_rollout:
-            inference_model = get_inference_model_and_runner(self.rollout)
+            inference_model, model_runner = get_inference_model_and_runner(self.rollout)
             model_param_names = set(name for name, _ in inference_model.named_parameters())
             print(f"[DEBUG sync_rollout_weights_by_checkpoint] model has {len(model_param_names)} parameters")
 
@@ -268,6 +269,7 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
         # Update the checkpoint with the inference model and broadcast weights
         self.checkpoint_engine.update_checkpoint(
             inference_model=inference_model,
+            model_runner=model_runner,
             group_name=sync_group_name,
             overlap_broadcast_and_consume=self.config.checkpoint_engine.overlap_broadcast_and_consume,
         )
