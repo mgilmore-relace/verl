@@ -691,3 +691,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             async_calls.schedule_async_request(async_save_request)
         else:
             finalize_save_fn()
+
+
+# Memory profiling: patches load_checkpoint when VERL_PROFILE_CHECKPOINT_MEMORY=1
+if os.getenv("VERL_PROFILE_CHECKPOINT_MEMORY", "0") == "1":
+    from verl.utils.checkpoint.memory_profiler import patch_load_checkpoint
+
+    patch_load_checkpoint()
