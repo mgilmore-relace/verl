@@ -44,9 +44,16 @@ def gptmodel_forward_1f1b_overlap(
 ) -> TransformerModelChunkSchedulePlan:
     pre_process: bool = unwrap_model(model).pre_process
     post_process: bool = unwrap_model(model).post_process
+
+    # Auto-detect FP8 padding from model config (FP8 requires total tokens % 8 == 0)
+    fp8 = unwrap_model(model).config.fp8
+    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+
     assert logits_processor is None, "only support fused kernel"
     batch_size, seq_len = attention_mask.shape[:2]
-    input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
+    input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(
+        input_ids, attention_mask, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+    )
     input_ids_rmpad = input_ids_rmpad.contiguous()
 
     schedule_plan = model.build_schedule_plan(
@@ -162,7 +169,7 @@ def gptmodel_forward_1f1b_overlap(
                 )
                 output_orig = logits.transpose(0, 1).contiguous()
                 args = {
-                    k: preprocess_packed_seqs(v, attention_mask_out, pre_process=True)[0]
+                    k: preprocess_packed_seqs(v, attention_mask_out, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
                     for k, v in logits_processor_args.items()
                 }
                 output_dict = logits_processor(output_orig, **args)
@@ -175,8 +182,8 @@ def gptmodel_forward_1f1b_overlap(
             else:
                 # fused kernel
 
-                labels_rmpad, _ = preprocess_packed_seqs(labels, attention_mask, pre_process=True)
-                labels_mask_rmpad, _ = preprocess_packed_seqs(labels_mask, attention_mask, pre_process=True)
+                labels_rmpad, _ = preprocess_packed_seqs(labels, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)
+                labels_mask_rmpad, _ = preprocess_packed_seqs(labels_mask, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)
                 labels_rmpad = labels_rmpad.contiguous()
                 labels_mask_rmpad = labels_mask_rmpad.contiguous()
 
