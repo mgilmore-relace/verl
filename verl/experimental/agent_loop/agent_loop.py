@@ -28,6 +28,7 @@ from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorHandle
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
@@ -81,7 +82,7 @@ class AsyncLLMServerManager:
         self.request_id_to_server = LRUCache(maxsize=max_cache_size)
 
         # Track active request_ids mapped to server for cancellation
-        self._request_ledger: dict[str, asyncio.Task] = {}
+        self._request_ledger: dict[str, ActorHandle] = {}
         self._request_lock = asyncio.Lock()
         self._active = True
 
@@ -123,41 +124,49 @@ class AsyncLLMServerManager:
             if self._active is False:
                 # Return early with abort status instead of starting new work
                 return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="abort")
-            self._request_ledger[generation_request_id] = asyncio.wrap_future(
-                server.generate.remote(
-                    request_id=generation_request_id,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=image_data,
-                    video_data=video_data,
-                ).future()
+            self._request_ledger[generation_request_id] = server
+            request = server.generate.remote(
+                request_id=generation_request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
             )
 
         try:
-            return await self._request_ledger[generation_request_id]
+            return await request
         finally:
             async with self._request_lock:
                 self._request_ledger.pop(generation_request_id, None)
 
-    async def sleep(self) -> dict[str, Any]:
-        """Abort all active requests tracked by this server manager.
+    async def sleep(self) -> None:
+        """Abort all active requests tracked by this server manager."""
 
-        Returns:
-            dict with aborted_count and request_ids
-        """
-        # Snapshot under lock and set cancelling flag to reject new requests
+        async def abort_request(req_id: str, server: ActorHandle):
+            for i in range(3):
+                response = await server.abort_request.remote(req_id)
+                if response.get("aborted", False):
+                    return None
+                await asyncio.sleep(0.5 * 2 ** i)
+            logger.warning(f"Failed to abort request {req_id} after 3 attempts.")
+
+        # Mark server as inactive to reject new requests
         async with self._request_lock:
             self._active = False
-            to_abort = dict(self._request_ledger)
 
-        # Only remove what we tried to abort (new requests during abort stay tracked)
-        async with self._request_lock:
-            for req_id in to_abort:
-                task = self._request_ledger.pop(req_id, None)
-                if task:
-                    task.cancel()
+        # Waits for in-flight requests to be registered in the remote
+        await asyncio.sleep(1.0)
 
-        return {"aborted_count": len(to_abort), "request_ids": list(to_abort.keys())}
+        request_to_abort = dict(self._request_ledger)
+
+        abort_requests = [
+            abort_request(req_id, server) for req_id, server in request_to_abort.items()
+        ]
+
+        await asyncio.gather(*abort_requests)
+
+        for req_id in request_to_abort.keys():
+            self._request_ledger.pop(req_id, None)
 
     async def wake_up(self):
         """Reset cancelling flag to allow new requests."""
