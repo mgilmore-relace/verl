@@ -77,14 +77,18 @@ if _VLLM_VERSION > version.parse("0.11.0") or _IS_DEV_VERSION:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.utils.network_utils import get_tcp_uri
 
-    if _VLLM_VERSION == version.parse("0.12.0") and not _IS_DEV_VERSION:
-        from vllm.entrypoints.harmony_utils import get_encoding
-
-        get_encoding()
-    elif _VLLM_VERSION >= version.parse("0.13.0") or _IS_DEV_VERSION:
-        from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-
-        get_encoding()
+    # Try to import and initialize get_encoding if available (removed in newer vllm versions)
+    try:
+        if _VLLM_VERSION == version.parse("0.12.0") and not _IS_DEV_VERSION:
+            from vllm.entrypoints.harmony_utils import get_encoding
+            get_encoding()
+        elif _VLLM_VERSION >= version.parse("0.13.0") or _IS_DEV_VERSION:
+            from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+            get_encoding()
+    except (ImportError, ModuleNotFoundError):
+        # harmony_utils and get_encoding were removed in newer vllm versions
+        # This is no longer needed for tiktoken initialization
+        pass
 else:
     from vllm.utils import FlexibleArgumentParser, get_tcp_uri
 if _VLLM_VERSION >= version.parse("0.12.0") or _IS_DEV_VERSION:
